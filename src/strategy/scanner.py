@@ -36,8 +36,11 @@ def _kelly_bet_size(edge: float, odds_prob: float) -> float:
     """
     if odds_prob <= 0 or odds_prob >= 1:
         return 0
-    b = (1 / odds_prob) - 1  # decimal odds minus 1
-    p = odds_prob
+    poly_price = odds_prob - edge
+    if poly_price <= 0 or poly_price >= 1:
+        return 0
+    b = (1 / poly_price) - 1  # Polymarket price-based decimal odds
+    p = odds_prob              # true probability (bookmaker consensus)
     q = 1 - p
     kelly_full = (b * p - q) / b if b > 0 else 0
     kelly_full = max(0, kelly_full)
