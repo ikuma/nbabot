@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Daily NBA edge scanner: find Polymarket vs sportsbook divergences."""
 
+import argparse
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -14,9 +15,14 @@ log = logging.getLogger(__name__)
 
 
 def main():
+    parser = argparse.ArgumentParser(description="NBA edge scanner")
+    parser.add_argument("--dry-run", action="store_true", help="Skip DB signal logging")
+    args = parser.parse_args()
+
     from src.connectors.odds_api import fetch_nba_odds
     from src.connectors.polymarket import fetch_all_moneylines
     from src.notifications.telegram import format_opportunities, send_message
+    from src.store.db import log_signal
     from src.strategy.scanner import scan
 
     log.info("=== NBA Edge Scanner ===")
@@ -43,7 +49,34 @@ def main():
     opportunities = scan(moneylines, games)
     log.info("Found %d opportunities above edge threshold", len(opportunities))
 
-    # 4. Generate report
+    # 4. Log signals to DB (unless --dry-run)
+    if not args.dry_run and opportunities:
+        # ゲームの commence_time をルックアップ用に構築
+        game_by_teams: dict[tuple[str, str], str] = {}
+        for g in games:
+            game_by_teams[(g.home_team, g.away_team)] = g.commence_time
+
+        for opp in opportunities:
+            signal_id = log_signal(
+                game_title=opp.game_title,
+                event_slug=opp.event_slug,
+                team=opp.team,
+                side=opp.side,
+                poly_price=opp.poly_price,
+                book_prob=opp.book_prob,
+                edge_pct=opp.edge_pct,
+                kelly_size=opp.kelly_size,
+                token_id=opp.token_id,
+                bookmakers_count=opp.bookmakers_count,
+            )
+            log.info(
+                "Signal #%d logged: %s %s edge=%.1f%%",
+                signal_id, opp.side, opp.team, opp.edge_pct,
+            )
+    elif args.dry_run:
+        log.info("--dry-run: skipping DB signal logging")
+
+    # 5. Generate report
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     report_dir = Path(__file__).resolve().parent.parent / "data" / "reports"
     report_dir.mkdir(parents=True, exist_ok=True)
@@ -70,11 +103,11 @@ def main():
     report_path.write_text("\n".join(lines))
     log.info("Report saved: %s", report_path)
 
-    # 5. Send Telegram notification
+    # 6. Send Telegram notification
     msg = format_opportunities(opportunities)
     send_message(msg)
 
-    # 6. Print summary
+    # 7. Print summary
     print(f"\n{'='*60}")
     print(f"  Games: {len(games)} | Moneylines: {len(moneylines)} | Opps: {len(opportunities)}")
     for opp in opportunities[:5]:
