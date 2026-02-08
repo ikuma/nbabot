@@ -151,6 +151,30 @@ class TestFetchTodaysGames:
         assert games[1].game_status == 3
 
 
+    @patch("src.connectors.nba_schedule.httpx.get")
+    def test_normalizes_la_clippers(self, mock_get):
+        """NBA.com 'LA Clippers' should be normalized to 'Los Angeles Clippers'."""
+        data = {
+            "scoreboard": {
+                "games": [
+                    {
+                        "gameId": "001",
+                        "gameTimeUTC": "2026-02-08T20:00:00Z",
+                        "gameStatus": 1,
+                        "homeTeam": {"teamCity": "LA", "teamName": "Clippers"},
+                        "awayTeam": {"teamCity": "Boston", "teamName": "Celtics"},
+                    },
+                ]
+            }
+        }
+        mock_resp = httpx.Response(200, request=_DUMMY_REQUEST, json=data)
+        mock_get.return_value = mock_resp
+
+        games = fetch_todays_games()
+        assert len(games) == 1
+        assert games[0].home_team == "Los Angeles Clippers"
+
+
 class TestNBAGame:
     def test_dataclass(self):
         game = NBAGame(

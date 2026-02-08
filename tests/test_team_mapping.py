@@ -5,6 +5,7 @@ from src.connectors.team_mapping import (
     full_name_from_short,
     get_team_abbr,
     get_team_short_name,
+    normalize_team_name,
 )
 
 
@@ -50,6 +51,21 @@ class TestFullNameFromShort:
 
     def test_unknown(self):
         assert full_name_from_short("Unknown") is None
+
+
+class TestNormalizeTeamName:
+    def test_la_clippers_alias(self):
+        assert normalize_team_name("LA Clippers") == "Los Angeles Clippers"
+
+    def test_la_lakers_alias(self):
+        assert normalize_team_name("LA Lakers") == "Los Angeles Lakers"
+
+    def test_already_canonical(self):
+        assert normalize_team_name("Boston Celtics") == "Boston Celtics"
+        assert normalize_team_name("Los Angeles Clippers") == "Los Angeles Clippers"
+
+    def test_unknown_name_passthrough(self):
+        assert normalize_team_name("Unknown Team") == "Unknown Team"
 
 
 class TestBuildEventSlug:

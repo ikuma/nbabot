@@ -41,7 +41,10 @@ def _run_bookmaker(args, games, moneylines):
             )
             log.info(
                 "Signal #%d logged: %s %s edge=%.1f%%",
-                signal_id, opp.side, opp.team, opp.edge_pct,
+                signal_id,
+                opp.side,
+                opp.team,
+                opp.edge_pct,
             )
 
     msg = format_opportunities(opportunities)
@@ -80,8 +83,11 @@ def _run_calibration(args, moneylines):
             )
             log.info(
                 "Signal #%d logged: %s %s cal_edge=%.1f%% band=%s",
-                signal_id, opp.side, opp.outcome_name,
-                opp.calibration_edge_pct, opp.price_band,
+                signal_id,
+                opp.side,
+                opp.outcome_name,
+                opp.calibration_edge_pct,
+                opp.price_band,
             )
 
     msg = format_opportunities(opportunities)
@@ -176,6 +182,7 @@ def main():
     # calibration モード → NBA.com 駆動 (Odds API 不使用)
     # bookmaker / both モード → Odds API 引き続き使用
     games = []
+    nba_games = []
     moneylines: list = []
 
     if mode in ("bookmaker", "both"):
@@ -193,9 +200,12 @@ def main():
         log.info("Fetching Polymarket moneyline markets...")
         moneylines = fetch_all_moneylines(games)
     else:
+        from src.connectors.nba_schedule import fetch_todays_games
         from src.connectors.polymarket_discovery import fetch_all_nba_moneylines
 
         log.info("Fetching NBA schedule from NBA.com...")
+        nba_games = fetch_todays_games()
+        log.info("NBA.com: %d games today", len(nba_games))
         moneylines = fetch_all_nba_moneylines()
 
     log.info("Moneyline events found: %d", len(moneylines))
@@ -221,8 +231,10 @@ def main():
 
     lines = [f"# NBA Edge Report {today} (mode={mode})\n"]
     if games:
+        lines.append(f"Games with odds: {len(games)} | Moneyline events found: {len(moneylines)}\n")
+    elif nba_games:
         lines.append(
-            f"Games with odds: {len(games)} | Moneyline events found: {len(moneylines)}\n"
+            f"NBA.com games: {len(nba_games)} | Moneyline events found: {len(moneylines)}\n"
         )
     else:
         lines.append(f"Moneyline events found: {len(moneylines)}\n")
@@ -251,7 +263,7 @@ def main():
     log.info("Report saved: %s", report_path)
 
     # Print summary
-    print(f"\n{'='*60}")
+    print(f"\n{'=' * 60}")
     if cal_opps:
         print(f"  [CAL] {len(cal_opps)} calibration signals")
         for opp in cal_opps[:5]:
@@ -271,7 +283,7 @@ def main():
             )
     if not cal_opps and not book_opps:
         print("  No opportunities found.")
-    print(f"{'='*60}")
+    print(f"{'=' * 60}")
 
 
 if __name__ == "__main__":

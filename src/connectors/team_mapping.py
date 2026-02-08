@@ -7,10 +7,10 @@ from dataclasses import dataclass, field
 
 @dataclass
 class TeamInfo:
-    full_name: str       # "Boston Celtics" (Odds API)
-    abbr: str            # "bos" (Polymarket slug)
-    short_name: str      # "Celtics" (Polymarket outcome)
-    city: str            # "Boston"
+    full_name: str  # "Boston Celtics" (Odds API)
+    abbr: str  # "bos" (Polymarket slug)
+    short_name: str  # "Celtics" (Polymarket outcome)
+    city: str  # "Boston"
     aliases: list[str] = field(default_factory=list)
 
 
@@ -20,7 +20,9 @@ NBA_TEAMS: dict[str, TeamInfo] = {
     "Brooklyn Nets": TeamInfo("Brooklyn Nets", "bkn", "Nets", "Brooklyn"),
     "Charlotte Hornets": TeamInfo("Charlotte Hornets", "cha", "Hornets", "Charlotte"),
     "Chicago Bulls": TeamInfo("Chicago Bulls", "chi", "Bulls", "Chicago"),
-    "Cleveland Cavaliers": TeamInfo("Cleveland Cavaliers", "cle", "Cavaliers", "Cleveland", ["Cavs"]),
+    "Cleveland Cavaliers": TeamInfo(
+        "Cleveland Cavaliers", "cle", "Cavaliers", "Cleveland", ["Cavs"]
+    ),
     "Dallas Mavericks": TeamInfo("Dallas Mavericks", "dal", "Mavericks", "Dallas", ["Mavs"]),
     "Denver Nuggets": TeamInfo("Denver Nuggets", "den", "Nuggets", "Denver"),
     "Detroit Pistons": TeamInfo("Detroit Pistons", "det", "Pistons", "Detroit"),
@@ -32,14 +34,20 @@ NBA_TEAMS: dict[str, TeamInfo] = {
     "Memphis Grizzlies": TeamInfo("Memphis Grizzlies", "mem", "Grizzlies", "Memphis"),
     "Miami Heat": TeamInfo("Miami Heat", "mia", "Heat", "Miami"),
     "Milwaukee Bucks": TeamInfo("Milwaukee Bucks", "mil", "Bucks", "Milwaukee"),
-    "Minnesota Timberwolves": TeamInfo("Minnesota Timberwolves", "min", "Timberwolves", "Minnesota", ["Wolves"]),
+    "Minnesota Timberwolves": TeamInfo(
+        "Minnesota Timberwolves", "min", "Timberwolves", "Minnesota", ["Wolves"]
+    ),
     "New Orleans Pelicans": TeamInfo("New Orleans Pelicans", "nop", "Pelicans", "New Orleans"),
     "New York Knicks": TeamInfo("New York Knicks", "nyk", "Knicks", "New York"),
     "Oklahoma City Thunder": TeamInfo("Oklahoma City Thunder", "okc", "Thunder", "Oklahoma City"),
     "Orlando Magic": TeamInfo("Orlando Magic", "orl", "Magic", "Orlando"),
-    "Philadelphia 76ers": TeamInfo("Philadelphia 76ers", "phi", "76ers", "Philadelphia", ["Sixers"]),
+    "Philadelphia 76ers": TeamInfo(
+        "Philadelphia 76ers", "phi", "76ers", "Philadelphia", ["Sixers"]
+    ),
     "Phoenix Suns": TeamInfo("Phoenix Suns", "phx", "Suns", "Phoenix"),
-    "Portland Trail Blazers": TeamInfo("Portland Trail Blazers", "por", "Trail Blazers", "Portland", ["Blazers"]),
+    "Portland Trail Blazers": TeamInfo(
+        "Portland Trail Blazers", "por", "Trail Blazers", "Portland", ["Blazers"]
+    ),
     "Sacramento Kings": TeamInfo("Sacramento Kings", "sac", "Kings", "Sacramento"),
     "San Antonio Spurs": TeamInfo("San Antonio Spurs", "sas", "Spurs", "San Antonio"),
     "Toronto Raptors": TeamInfo("Toronto Raptors", "tor", "Raptors", "Toronto"),
@@ -53,6 +61,18 @@ for _full, _info in NBA_TEAMS.items():
     _SHORT_TO_FULL[_info.short_name.lower()] = _full
     for _alias in _info.aliases:
         _SHORT_TO_FULL[_alias.lower()] = _full
+
+
+# NBA.com team name aliases (shortened city names → canonical full names)
+NBA_NAME_ALIASES: dict[str, str] = {
+    "LA Clippers": "Los Angeles Clippers",
+    "LA Lakers": "Los Angeles Lakers",
+}
+
+
+def normalize_team_name(name: str) -> str:
+    """Normalize NBA.com team name to canonical form used in NBA_TEAMS."""
+    return NBA_NAME_ALIASES.get(name, name)
 
 
 def get_team_abbr(full_name: str) -> str | None:

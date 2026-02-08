@@ -107,12 +107,17 @@ def scan_calibration(
 
             price = ml.prices[i]
 
+            if price <= 0 or price >= 1:
+                logger.debug("Skipping %s: invalid price %.3f", outcome_name, price)
+                continue
+
             # 価格帯フィルター
             if price < lo or price > hi:
                 continue
 
             band = lookup_band(price)
             if band is None:
+                logger.debug("No calibration band for %s @ %.3f", outcome_name, price)
                 continue
 
             expected_wr = band.expected_win_rate
@@ -121,6 +126,12 @@ def scan_calibration(
 
             # 最低エッジ閾値
             if edge_pct < threshold:
+                logger.debug(
+                    "Edge below threshold for %s: %.1f%% < %.1f%%",
+                    outcome_name,
+                    edge_pct,
+                    threshold,
+                )
                 continue
 
             ev = _ev_per_dollar(expected_wr, price)

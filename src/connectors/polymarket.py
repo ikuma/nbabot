@@ -19,11 +19,37 @@ logger = logging.getLogger(__name__)
 ET = ZoneInfo("America/New_York")
 
 NBA_KEYWORDS = [
-    "nba", "basketball", "lakers", "celtics", "warriors", "nuggets",
-    "bucks", "76ers", "suns", "heat", "knicks", "nets", "bulls",
-    "cavaliers", "mavericks", "rockets", "clippers", "grizzlies",
-    "timberwolves", "thunder", "kings", "hawks", "raptors", "pacers",
-    "magic", "hornets", "wizards", "pistons", "spurs", "blazers", "jazz",
+    "nba",
+    "basketball",
+    "lakers",
+    "celtics",
+    "warriors",
+    "nuggets",
+    "bucks",
+    "76ers",
+    "suns",
+    "heat",
+    "knicks",
+    "nets",
+    "bulls",
+    "cavaliers",
+    "mavericks",
+    "rockets",
+    "clippers",
+    "grizzlies",
+    "timberwolves",
+    "thunder",
+    "kings",
+    "hawks",
+    "raptors",
+    "pacers",
+    "magic",
+    "hornets",
+    "wizards",
+    "pistons",
+    "spurs",
+    "blazers",
+    "jazz",
     "pelicans",
 ]
 
@@ -101,11 +127,13 @@ def _is_nba_market(market: dict[str, Any]) -> bool:
 def _parse_market(raw: dict[str, Any]) -> NBAMarket:
     tokens = []
     for t in raw.get("tokens", []):
-        tokens.append(MarketToken(
-            token_id=t["token_id"],
-            outcome=t.get("outcome", ""),
-            price=float(t.get("price", 0)),
-        ))
+        tokens.append(
+            MarketToken(
+                token_id=t["token_id"],
+                outcome=t.get("outcome", ""),
+                price=float(t.get("price", 0)),
+            )
+        )
     return NBAMarket(
         condition_id=raw.get("condition_id", ""),
         question=raw.get("question", ""),
@@ -125,6 +153,7 @@ def _parse_json_or_csv(value: str | list) -> list[str]:
     value = value.strip()
     if value.startswith("["):
         import json
+
         try:
             return [str(v) for v in json.loads(value)]
         except (json.JSONDecodeError, ValueError):
@@ -166,20 +195,24 @@ def fetch_nba_markets_gamma() -> list[NBAMarket]:
 
             tokens = []
             for i, tid in enumerate(clob_ids):
-                tokens.append(MarketToken(
-                    token_id=tid,
-                    outcome=outcomes[i] if i < len(outcomes) else f"Outcome {i}",
-                    price=float(prices[i]) if i < len(prices) else 0.0,
-                ))
+                tokens.append(
+                    MarketToken(
+                        token_id=tid,
+                        outcome=outcomes[i] if i < len(outcomes) else f"Outcome {i}",
+                        price=float(prices[i]) if i < len(prices) else 0.0,
+                    )
+                )
 
-            markets.append(NBAMarket(
-                condition_id=raw.get("conditionId", raw.get("condition_id", "")),
-                question=question,
-                tokens=tokens,
-                end_date=raw.get("endDate", raw.get("end_date_iso", "")),
-                active=raw.get("active", True),
-                slug=raw.get("slug", ""),
-            ))
+            markets.append(
+                NBAMarket(
+                    condition_id=raw.get("conditionId", raw.get("condition_id", "")),
+                    question=question,
+                    tokens=tokens,
+                    end_date=raw.get("endDate", raw.get("end_date_iso", "")),
+                    active=raw.get("active", True),
+                    slug=raw.get("slug", ""),
+                )
+            )
 
         if len(data) < limit:
             break
@@ -243,15 +276,16 @@ def get_balance() -> dict[str, Any]:
 # Events API – per-game moneyline markets
 # ---------------------------------------------------------------------------
 
+
 @dataclass
 class MoneylineMarket:
     condition_id: str
     event_slug: str
-    event_title: str       # "Knicks vs. Celtics"
-    home_team: str         # full name, e.g. "Boston Celtics"
-    away_team: str         # full name, e.g. "New York Knicks"
-    outcomes: list[str]    # ["Knicks", "Celtics"]
-    prices: list[float]    # [0.405, 0.595]
+    event_title: str  # "Knicks vs. Celtics"
+    home_team: str  # full name, e.g. "Boston Celtics"
+    away_team: str  # full name, e.g. "New York Knicks"
+    outcomes: list[str]  # ["Knicks", "Celtics"]
+    prices: list[float]  # [0.405, 0.595]
     token_ids: list[str]
     sports_market_type: str
     active: bool
@@ -296,14 +330,40 @@ def fetch_moneyline_for_game(
     event_title = event.get("title", f"{away_team} vs {home_team}")
 
     # Search nested markets for the moneyline
+    moneyline_count = 0
     for mkt in event.get("markets", []):
         if mkt.get("sportsMarketType") != "moneyline":
             continue
+
+        moneyline_count += 1
+        if moneyline_count > 1:
+            logger.warning("Multiple moneyline markets for slug=%s, using first", slug)
+            break
 
         outcomes = _parse_json_or_csv(mkt.get("outcomes", ""))
         prices_raw = _parse_json_or_csv(mkt.get("outcomePrices", ""))
         token_ids = _parse_json_or_csv(mkt.get("clobTokenIds", ""))
         prices = [float(p) for p in prices_raw] if prices_raw else []
+
+        if not outcomes:
+            logger.warning("Empty outcomes for slug=%s", slug)
+            return None
+        if not prices:
+            logger.warning("Empty prices for slug=%s", slug)
+            return None
+        if len(outcomes) != 2:
+            logger.warning(
+                "Expected 2 outcomes, got %d for slug=%s",
+                len(outcomes),
+                slug,
+            )
+        if len(token_ids) != len(outcomes):
+            logger.warning(
+                "Token count mismatch: %d tokens vs %d outcomes for slug=%s",
+                len(token_ids),
+                len(outcomes),
+                slug,
+            )
 
         return MoneylineMarket(
             condition_id=mkt.get("conditionId", mkt.get("condition_id", "")),
@@ -346,7 +406,9 @@ def fetch_all_moneylines(games: list) -> list[MoneylineMarket]:
         else:
             logger.info(
                 "No moneyline found: %s @ %s (%s)",
-                game.away_team, game.home_team, game_date,
+                game.away_team,
+                game.home_team,
+                game_date,
             )
 
     logger.info("Fetched %d moneyline markets for %d games", len(moneylines), len(games))
