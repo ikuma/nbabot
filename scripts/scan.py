@@ -173,21 +173,31 @@ def main():
     if args.dry_run:
         log.info("--dry-run: skipping DB signal logging")
 
-    # Odds API は bookmaker モードと both モードで必要
-    # calibration モードでもゲームリスト取得に使用 (Phase 2 で Polymarket 駆動に切替)
-    from src.connectors.odds_api import fetch_nba_odds
-    from src.connectors.polymarket import fetch_all_moneylines
+    # calibration モード → NBA.com 駆動 (Odds API 不使用)
+    # bookmaker / both モード → Odds API 引き続き使用
+    games = []
+    moneylines: list = []
 
-    log.info("Fetching sportsbook odds...")
-    games = fetch_nba_odds()
-    log.info("Found %d games with odds", len(games))
+    if mode in ("bookmaker", "both"):
+        from src.connectors.odds_api import fetch_nba_odds
+        from src.connectors.polymarket import fetch_all_moneylines
 
-    if not games:
-        log.warning("No NBA games found on Odds API")
-        return
+        log.info("Fetching sportsbook odds...")
+        games = fetch_nba_odds()
+        log.info("Found %d games with odds", len(games))
 
-    log.info("Fetching Polymarket moneyline markets...")
-    moneylines = fetch_all_moneylines(games)
+        if not games:
+            log.warning("No NBA games found on Odds API")
+            return
+
+        log.info("Fetching Polymarket moneyline markets...")
+        moneylines = fetch_all_moneylines(games)
+    else:
+        from src.connectors.polymarket_discovery import fetch_all_nba_moneylines
+
+        log.info("Fetching NBA schedule from NBA.com...")
+        moneylines = fetch_all_nba_moneylines()
+
     log.info("Moneyline events found: %d", len(moneylines))
 
     if not moneylines:
@@ -210,9 +220,12 @@ def main():
     report_path = report_dir / f"{today}.md"
 
     lines = [f"# NBA Edge Report {today} (mode={mode})\n"]
-    lines.append(
-        f"Games with odds: {len(games)} | Moneyline events found: {len(moneylines)}\n"
-    )
+    if games:
+        lines.append(
+            f"Games with odds: {len(games)} | Moneyline events found: {len(moneylines)}\n"
+        )
+    else:
+        lines.append(f"Moneyline events found: {len(moneylines)}\n")
 
     if mode in ("calibration", "both") and cal_opps:
         lines.append("# Calibration Signals\n")
