@@ -44,6 +44,11 @@ class Settings(BaseSettings):
     max_daily_positions: int = 20
     max_daily_exposure_usd: float = 2000.0
 
+    # === NBA.com schedule ===
+    nba_scoreboard_url: str = (
+        "https://cdn.nba.com/static/json/liveData/scoreboard/todaysScoreboard_00.json"
+    )
+
     # === Odds API validation ===
     use_odds_api_validation: bool = False  # bookmaker cross-check
 
