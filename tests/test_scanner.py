@@ -1,4 +1,4 @@
-"""Tests for divergence scanner (most critical)."""
+"""Tests for legacy bookmaker divergence scanner."""
 
 from __future__ import annotations
 
@@ -103,7 +103,7 @@ def _make_moneyline(
 
 class TestScan:
     def _patch_settings(self, monkeypatch):
-        monkeypatch.setattr("src.strategy.scanner.settings.min_edge_pct", 5.0)
+        monkeypatch.setattr("src.strategy.scanner.settings.min_edge_pct", 1.0)
         monkeypatch.setattr("src.strategy.scanner.settings.kelly_fraction", 0.25)
         monkeypatch.setattr("src.strategy.scanner.settings.max_position_usd", 100.0)
 
@@ -121,16 +121,18 @@ class TestScan:
         assert all(o.side == "BUY" for o in opps)
 
     def test_no_signal_when_edge_below_threshold(self, monkeypatch):
-        """Edge < min_edge_pct → empty list."""
+        """Edge < min_edge_pct (1%) → empty list."""
         self._patch_settings(monkeypatch)
-        # BOS consensus ~0.625, poly price 0.61 → edge ~1.5% (< 5%)
+        # BOS consensus ~0.625, poly price 0.62 → edge ~0.5% (< 1%)
         game = _make_game("Boston Celtics", "New York Knicks", -200, 150)
         ml = _make_moneyline(
             "Boston Celtics", "New York Knicks", "Celtics", "Knicks",
-            home_price=0.61, away_price=0.40,
+            home_price=0.62, away_price=0.40,
         )
         opps = scan([ml], [game])
-        assert opps == []
+        # エッジが 1% 未満のため全てフィルタされる
+        bos_opps = [o for o in opps if o.team == "Boston Celtics"]
+        assert bos_opps == []
 
     def test_no_sell_signal(self, monkeypatch):
         """Polymarket price HIGHER than book → no signal (BUY only)."""
@@ -211,3 +213,44 @@ class TestScan:
         )
         opps = scan([ml], [game])
         assert opps == []
+
+    def test_low_edge_signal_included(self, monkeypatch):
+        """Edge 2% (between 1-5%) now produces a signal with new threshold."""
+        self._patch_settings(monkeypatch)
+        # BOS consensus ~0.625, poly price 0.61 → edge ~1.5% (>= 1%)
+        game = _make_game("Boston Celtics", "New York Knicks", -200, 150)
+        ml = _make_moneyline(
+            "Boston Celtics", "New York Knicks", "Celtics", "Knicks",
+            home_price=0.61, away_price=0.40,
+        )
+        opps = scan([ml], [game])
+        bos_opps = [o for o in opps if o.team == "Boston Celtics"]
+        assert len(bos_opps) >= 1
+        assert bos_opps[0].edge_pct < 5.0
+        assert bos_opps[0].edge_pct >= 1.0
+
+    def test_negative_ev_skipped(self, monkeypatch):
+        """Edge <= 0 (Polymarket overpriced) → no signal."""
+        self._patch_settings(monkeypatch)
+        # BOS consensus ~0.625, poly price 0.65 → edge < 0
+        game = _make_game("Boston Celtics", "New York Knicks", -200, 150)
+        ml = _make_moneyline(
+            "Boston Celtics", "New York Knicks", "Celtics", "Knicks",
+            home_price=0.65, away_price=0.40,
+        )
+        opps = scan([ml], [game])
+        bos_opps = [o for o in opps if o.team == "Boston Celtics"]
+        assert bos_opps == []
+
+    def test_opportunity_has_consensus_std(self, monkeypatch):
+        """Opportunity includes consensus_std field."""
+        self._patch_settings(monkeypatch)
+        game = _make_game("Boston Celtics", "New York Knicks", -200, 150)
+        ml = _make_moneyline(
+            "Boston Celtics", "New York Knicks", "Celtics", "Knicks",
+            home_price=0.50, away_price=0.35,
+        )
+        opps = scan([ml], [game])
+        assert len(opps) >= 1
+        # consensus_std は float で、単一ブックメーカーなので 0.0
+        assert isinstance(opps[0].consensus_std, float)

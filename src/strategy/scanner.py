@@ -1,4 +1,8 @@
-"""Divergence scanner: compares Polymarket moneyline prices vs sportsbook consensus."""
+"""Legacy bookmaker divergence scanner (--mode bookmaker).
+
+Compares Polymarket moneyline prices vs sportsbook consensus.
+Superseded by calibration_scanner.py for the primary calibration strategy.
+"""
 
 from __future__ import annotations
 
@@ -25,6 +29,7 @@ class Opportunity:
     token_id: str
     kelly_size: float
     bookmakers_count: int
+    consensus_std: float = 0.0
     consensus_detail: dict[str, float] = field(default_factory=dict)
 
 
@@ -94,12 +99,15 @@ def scan(
             poly_price = ml.prices[i]
             edge = book_prob - poly_price
 
-            # BUY only: Polymarket undervalues this outcome
+            # BUY only: skip negative EV and sub-threshold noise
             if edge < min_edge:
                 continue
 
             kelly = _kelly_bet_size(edge, book_prob)
             position_usd = min(kelly * settings.max_position_usd * 10, settings.max_position_usd)
+
+            # 確信度: ブックメーカー間の合意度 (std が小さいほど確信度高)
+            team_std = game.consensus_std.get(full_name, 0.0)
 
             opportunities.append(Opportunity(
                 game_title=ml.event_title,
@@ -112,6 +120,7 @@ def scan(
                 token_id=ml.token_ids[i],
                 kelly_size=position_usd,
                 bookmakers_count=len(game.bookmakers),
+                consensus_std=team_std,
                 consensus_detail=consensus,
             ))
 

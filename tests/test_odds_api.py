@@ -60,6 +60,40 @@ class TestConsensusProbs:
         assert game.consensus_probs == {}
 
 
+class TestConsensusStd:
+    def test_single_bookmaker_zero_std(self):
+        """Single bookmaker → std is 0 for all teams."""
+        game = GameOdds(
+            game_id="g1",
+            home_team="Boston Celtics",
+            away_team="New York Knicks",
+            commence_time="2026-02-08T00:00:00Z",
+            bookmakers=[
+                BookmakerOdds("bk1", "", [
+                    TeamOdds("Boston Celtics", -200, 0.6667),
+                    TeamOdds("New York Knicks", +150, 0.4),
+                ]),
+            ],
+        )
+        std = game.consensus_std
+        assert std["Boston Celtics"] == 0.0
+        assert std["New York Knicks"] == 0.0
+
+    def test_multiple_bookmakers_positive_std(self, sample_game_odds: GameOdds):
+        """Multiple bookmakers with different odds → positive std."""
+        std = sample_game_odds.consensus_std
+        # Two bookmakers with different odds → non-zero std
+        assert std["Boston Celtics"] > 0
+        assert std["New York Knicks"] > 0
+
+    def test_no_bookmakers_empty(self):
+        game = GameOdds("g2", "A", "B", "", bookmakers=[])
+        assert game.consensus_std == {}
+
+    def test_bookmaker_count(self, sample_game_odds: GameOdds):
+        assert sample_game_odds.bookmaker_count == 2
+
+
 class TestFetchNbaOdds:
     def test_api_key_not_set(self, monkeypatch):
         monkeypatch.setattr("src.connectors.odds_api.settings.odds_api_key", "")

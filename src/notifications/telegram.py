@@ -37,16 +37,34 @@ def send_message(text: str, parse_mode: str = "Markdown") -> bool:
 
 
 def format_opportunities(opportunities: list) -> str:
-    """Format opportunities list into a Telegram message."""
+    """Format opportunities list into a Telegram message.
+
+    Handles both Opportunity (bookmaker) and CalibrationOpportunity objects.
+    """
     if not opportunities:
         return "No NBA edge opportunities found today."
 
     lines = ["*NBA Edge Report*\n"]
     for i, opp in enumerate(opportunities, 1):
-        lines.append(
-            f"{i}. *{opp.game_title}*\n"
-            f"   {opp.side} {opp.team} @ {opp.poly_price:.2f} | Book: {opp.book_prob:.2f}\n"
-            f"   Edge: {opp.edge_pct:.1f}% | Kelly size: ${opp.kelly_size:.0f}\n"
-            f"   Books: {opp.bookmakers_count}"
-        )
+        # CalibrationOpportunity has calibration_edge_pct attribute
+        if hasattr(opp, "calibration_edge_pct"):
+            spot = " \\[SWEET]" if opp.in_sweet_spot else ""
+            lines.append(
+                f"{i}. *{opp.event_title}*{spot}\n"
+                f"   {opp.side} {opp.outcome_name} @ {opp.poly_price:.2f}\n"
+                f"   Cal edge: {opp.calibration_edge_pct:.1f}%"
+                f" | WR: {opp.expected_win_rate:.0%}\n"
+                f"   EV/$: {opp.ev_per_dollar:.2f}"
+                f" | Band: {opp.price_band}"
+                f" | Size: ${opp.position_usd:.0f}"
+            )
+        else:
+            lines.append(
+                f"{i}. *{opp.game_title}*\n"
+                f"   {opp.side} {opp.team} @ {opp.poly_price:.2f}"
+                f" | Book: {opp.book_prob:.2f}\n"
+                f"   Edge: {opp.edge_pct:.1f}%"
+                f" | Kelly size: ${opp.kelly_size:.0f}\n"
+                f"   Books: {opp.bookmakers_count}"
+            )
     return "\n".join(lines)

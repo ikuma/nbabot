@@ -1,8 +1,13 @@
-"""The Odds API connector for fetching NBA sportsbook odds."""
+"""The Odds API connector for fetching NBA sportsbook odds.
+
+In calibration mode, used only for game list discovery (1 req/day).
+In bookmaker mode, used for consensus probability calculation.
+"""
 
 from __future__ import annotations
 
 import logging
+import statistics
 from dataclasses import dataclass
 
 import httpx
@@ -49,6 +54,26 @@ class GameOdds:
                 team_probs.setdefault(o.team, []).append(fair_prob)
 
         return {team: sum(ps) / len(ps) for team, ps in team_probs.items()}
+
+    @property
+    def consensus_std(self) -> dict[str, float]:
+        """Standard deviation of vig-removed probabilities across bookmakers."""
+        team_probs: dict[str, list[float]] = {}
+        for bm in self.bookmakers:
+            total = sum(o.implied_prob for o in bm.outcomes)
+            for o in bm.outcomes:
+                fair_prob = o.implied_prob / total if total > 0 else 0
+                team_probs.setdefault(o.team, []).append(fair_prob)
+
+        return {
+            team: statistics.stdev(ps) if len(ps) >= 2 else 0.0
+            for team, ps in team_probs.items()
+        }
+
+    @property
+    def bookmaker_count(self) -> int:
+        """Number of bookmakers providing odds."""
+        return len(self.bookmakers)
 
 
 def american_to_prob(odds: int) -> float:

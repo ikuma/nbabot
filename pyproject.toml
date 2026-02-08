@@ -1,7 +1,7 @@
 [project]
 name = "nbabot"
 version = "0.1.0"
-description = "Polymarket NBA temporal arbitrage bot"
+description = "Polymarket NBA calibration-based mispricing bot"
 requires-python = ">=3.11"
 dependencies = [
     "py-clob-client>=0.34.5",

@@ -1,40 +1,57 @@
 # nbabot
 
-Polymarket NBA テンポラルアービトラージ Bot。ブックメーカーオッズを真の確率の代理指標とし、Polymarket の価格調整遅延（エッジ）を検出する。
+Polymarket NBA キャリブレーション Bot。Polymarket の構造的ミスプライシング（価格帯ごとの系統的な過小評価）を校正テーブルで検出し、広く刈り取る戦略。
+
+## 戦略概要
+
+**主戦略: キャリブレーション (calibration)**
+- Polymarket は価格帯 0.25-0.55 のアウトカムを系統的に過小評価している (暗示確率 25-40% → 実勝率 72-80%)
+- lhtsports の実績データ ($38.7M リスク → +$1.2M, ROI 3.11%) から導出した校正テーブルで期待勝率を推定
+- 各試合で両アウトカムの EV/$ を比較し、高い方を 1 つだけ購入
+- 予測モデル不要 — 価格帯ベースの構造的エッジ
+
+**副戦略: ブックメーカー乖離 (bookmaker) — レガシー**
+- ブックメーカーコンセンサス vs Polymarket の乖離を検出する従来方式
+- `--mode bookmaker` で引き続き利用可能
+- 校正モードの高確信シグナルの追加検証に活用予定 (Phase 4)
 
 ## プロジェクト構成
 
 ```
 nbabot/
 ├── src/
-│   ├── config.py                # Pydantic Settings (.env 読込)
+│   ├── config.py                     # Pydantic Settings (.env 読込)
 │   ├── connectors/
-│   │   ├── odds_api.py          # The Odds API (スポーツブックオッズ)
-│   │   ├── polymarket.py        # Polymarket Gamma/CLOB API
-│   │   └── team_mapping.py      # チーム名 ↔ Polymarket slug 変換
+│   │   ├── odds_api.py               # The Odds API (オプション — ゲームリスト取得・検証用)
+│   │   ├── polymarket.py             # Polymarket Gamma/CLOB API
+│   │   └── team_mapping.py           # チーム名 ↔ Polymarket slug 変換
 │   ├── strategy/
-│   │   └── scanner.py           # 乖離検出 (BUY シグナルのみ)
+│   │   ├── calibration.py            # 校正テーブル (CalibrationBand, lookup)
+│   │   ├── calibration_scanner.py    # 校正ベーススキャナー (主戦略)
+│   │   └── scanner.py               # ブックメーカー乖離スキャナー (レガシー)
 │   ├── notifications/
-│   │   └── telegram.py          # Telegram 通知
-│   ├── execution/               # 注文実行 (未実装 — Phase 2)
-│   ├── risk/                    # リスク管理 (未実装 — Phase 2)
-│   └── store/                   # 取引履歴 DB (未実装)
+│   │   └── telegram.py               # Telegram 通知
+│   ├── execution/                    # 注文実行 (未実装 — Phase 4)
+│   ├── risk/                         # リスク管理 (未実装 — Phase 4)
+│   └── store/
+│       └── db.py                     # SQLite (シグナル・結果ログ)
 ├── scripts/
-│   ├── scan.py                  # 日次エッジスキャン (メインエントリ)
-│   └── check_balance.py         # API 接続確認
-├── agents/                      # エージェントプロンプト
-├── data/reports/                 # 日次レポート出力先 (.gitignore 対象)
+│   ├── scan.py                       # 日次エッジスキャン (メインエントリ)
+│   └── check_balance.py              # API 接続確認
+├── agents/                           # エージェントプロンプト
+├── data/reports/                     # 日次レポート出力先 (.gitignore 対象)
 ├── tests/
-├── PLAN.md                      # 戦略設計書 (フェーズ計画・リスクパラメータ)
+├── PLAN.md                           # 戦略設計書 (フェーズ計画・リスクパラメータ)
 ├── pyproject.toml
-└── .env                         # 秘密鍵・API キー (.gitignore 対象)
+└── .env                              # 秘密鍵・API キー (.gitignore 対象)
 ```
 
 ## 開発環境
 
 - **Python**: 3.11+ 必須
 - **依存インストール**: `pip install -e .` (venv 推奨)
-- **日次スキャン**: `python scripts/scan.py`
+- **日次スキャン**: `python scripts/scan.py` (デフォルト: calibration モード)
+- **モード指定**: `python scripts/scan.py --mode calibration|bookmaker|both`
 - **接続確認**: `python scripts/check_balance.py`
 - **テスト**: `pytest`
 - **リント**: `ruff check src/ scripts/`
@@ -51,20 +68,37 @@ nbabot/
 
 ## データフロー
 
+### Calibration モード (主戦略)
+
+```
+Odds API ──→ GameOdds[] ──→ ゲームリスト (discovery)
+                                    │
+Gamma Events API ──→ MoneylineMarket[] ──→ 両アウトカム価格
+                                    │
+                                    ↓
+                      calibration_scanner.scan_calibration()
+                        校正テーブル lookup → EV/$ 計算
+                        → 高 EV 側を選択 (1 試合 1 シグナル)
+                                    │
+                                    ↓
+                        CalibrationOpportunity[] (BUY のみ)
+                                    │
+                      ┌─────────────┼─────────────┐
+                      ↓             ↓             ↓
+                レポート (.md)  Telegram 通知   (stdout)
+```
+
+### Bookmaker モード (レガシー)
+
 ```
 Odds API (h2h) ──→ GameOdds[] ──────────────────┐
                                                   │
 Gamma Events API ──→ MoneylineMarket[] ──────────┤
-  slug: nba-{away_abbr}-{home_abbr}-YYYY-MM-DD   │
                                                   ↓
                                           scanner.scan()
                                                   │
                                                   ↓
                                         Opportunity[] (BUY のみ)
-                                                  │
-                                    ┌─────────────┼─────────────┐
-                                    ↓             ↓             ↓
-                              レポート (.md)  Telegram 通知   (stdout)
 ```
 
 ## Polymarket slug 規則
@@ -78,14 +112,20 @@ Gamma Events API ──→ MoneylineMarket[] ──────────┤
 
 | 変数 | 必須 | 説明 |
 |------|------|------|
-| `ODDS_API_KEY` | Yes | The Odds API キー |
+| `ODDS_API_KEY` | Yes* | The Odds API キー (*Phase 2 で optional 化予定) |
 | `HTTP_PROXY` | geo 制限時 | Polymarket 用プロキシ (`socks5://...`) |
 | `POLYMARKET_PRIVATE_KEY` | 取引時 | Polygon ウォレット秘密鍵 |
 | `TELEGRAM_BOT_TOKEN` | 通知時 | Telegram Bot トークン |
 | `TELEGRAM_CHAT_ID` | 通知時 | 通知先チャット ID |
-| `MIN_EDGE_PCT` | No | 最小エッジ閾値 % (default: 5) |
+| `STRATEGY_MODE` | No | `calibration` (default) / `bookmaker` |
+| `MIN_BUY_PRICE` | No | 校正モード最低購入価格 (default: 0.20) |
+| `MAX_BUY_PRICE` | No | 校正モード最高購入価格 (default: 0.85) |
+| `MIN_CALIBRATION_EDGE_PCT` | No | 校正エッジ最低閾値 % (default: 3.0) |
+| `MIN_EDGE_PCT` | No | bookmaker モード最小エッジ閾値 % (default: 1.0) |
 | `KELLY_FRACTION` | No | Kelly 分数 (default: 0.25) |
 | `MAX_POSITION_USD` | No | 1 取引最大額 (default: 100) |
+| `MAX_DAILY_POSITIONS` | No | 1 日最大ポジション数 (default: 20) |
+| `MAX_DAILY_EXPOSURE_USD` | No | 1 日最大エクスポージャー (default: 2000) |
 
 ## セキュリティ
 
@@ -112,6 +152,8 @@ Gamma Events API ──→ MoneylineMarket[] ──────────┤
 - `py-clob-client` は CLOB フォールバック専用。Events API パスでは不要 (lazy import 済み)。
 - `data/reports/*.md` は `.gitignore` 対象。
 - Polymarket は地域制限あり。日本からは `HTTP_PROXY` が必要な場合がある。
-- Odds API 無料枠は月 500 リクエスト。スキャン頻度に注意。
-- スキャナーは BUY シグナルのみ出力 (Polymarket が book consensus より安い場合)。
+- Odds API 無料枠は月 500 リクエスト。calibration モードではゲームリスト取得のみに使用 (1 回/日)。
+- 校正スキャナーは BUY シグナルのみ。1 試合で両アウトカムの EV を比較し、高い方を 1 つ選択。
 - Kelly criterion の分数 (default 0.25) でポジションサイジング。フル Kelly は使わない。
+- スイートスポット (0.25-0.55) 内はフル Kelly、外は 0.5x Kelly。
+- `scanner.py` (bookmaker 乖離) はレガシーモードとして温存。削除しない。

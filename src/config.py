@@ -27,8 +27,25 @@ class Settings(BaseSettings):
     # Risk parameters
     max_position_usd: float = 100.0
     daily_loss_limit_pct: float = 3.0
-    min_edge_pct: float = 5.0
+    min_edge_pct: float = 1.0
     kelly_fraction: float = 0.25
+
+    # === Calibration strategy ===
+    strategy_mode: str = "calibration"  # "calibration" | "bookmaker"
+    min_buy_price: float = 0.20
+    max_buy_price: float = 0.85
+    sweet_spot_lo: float = 0.25
+    sweet_spot_hi: float = 0.55
+    min_calibration_edge_pct: float = 3.0  # minimum calibration edge %
+
+    # === Capital management ===
+    scan_moneyline: bool = True
+    scan_total: bool = False  # Phase 3
+    max_daily_positions: int = 20
+    max_daily_exposure_usd: float = 2000.0
+
+    # === Odds API validation ===
+    use_odds_api_validation: bool = False  # bookmaker cross-check
 
 
 settings = Settings()

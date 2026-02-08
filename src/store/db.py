@@ -22,6 +22,7 @@ CREATE TABLE IF NOT EXISTS signals (
     kelly_size  REAL NOT NULL,
     token_id    TEXT NOT NULL,
     bookmakers_count INTEGER NOT NULL DEFAULT 0,
+    consensus_std REAL NOT NULL DEFAULT 0.0,
     commence_time TEXT NOT NULL DEFAULT '',
     created_at  TEXT NOT NULL
 );
@@ -52,8 +53,17 @@ class SignalRecord:
     kelly_size: float
     token_id: str
     bookmakers_count: int
+    consensus_std: float
     commence_time: str
     created_at: str
+    # 校正戦略カラム (既存レコードでは None / デフォルト値)
+    market_type: str = "moneyline"
+    calibration_edge_pct: float | None = None
+    expected_win_rate: float | None = None
+    price_band: str = ""
+    in_sweet_spot: int = 0
+    band_confidence: str = ""
+    strategy_mode: str = "bookmaker"
 
 
 @dataclass
@@ -88,7 +98,29 @@ def _connect(db_path: Path | str = DEFAULT_DB_PATH) -> sqlite3.Connection:
     conn = sqlite3.connect(str(db_path))
     conn.row_factory = sqlite3.Row
     conn.executescript(SCHEMA_SQL)
+    _ensure_calibration_columns(conn)
     return conn
+
+
+# 校正戦略用の新カラム (既存 DB との後方互換性のため ALTER TABLE で追加)
+_CALIBRATION_COLUMNS = [
+    ("market_type", "TEXT DEFAULT 'moneyline'"),
+    ("calibration_edge_pct", "REAL"),
+    ("expected_win_rate", "REAL"),
+    ("price_band", "TEXT DEFAULT ''"),
+    ("in_sweet_spot", "INTEGER DEFAULT 0"),
+    ("band_confidence", "TEXT DEFAULT ''"),
+    ("strategy_mode", "TEXT DEFAULT 'bookmaker'"),
+]
+
+
+def _ensure_calibration_columns(conn: sqlite3.Connection) -> None:
+    """Add calibration columns to signals table if they don't exist."""
+    existing = {row[1] for row in conn.execute("PRAGMA table_info(signals)").fetchall()}
+    for col_name, col_def in _CALIBRATION_COLUMNS:
+        if col_name not in existing:
+            conn.execute(f"ALTER TABLE signals ADD COLUMN {col_name} {col_def}")
+    conn.commit()
 
 
 def log_signal(
@@ -103,7 +135,15 @@ def log_signal(
     kelly_size: float,
     token_id: str,
     bookmakers_count: int = 0,
+    consensus_std: float = 0.0,
     commence_time: str = "",
+    market_type: str = "moneyline",
+    calibration_edge_pct: float | None = None,
+    expected_win_rate: float | None = None,
+    price_band: str = "",
+    in_sweet_spot: bool = False,
+    band_confidence: str = "",
+    strategy_mode: str = "bookmaker",
     db_path: Path | str = DEFAULT_DB_PATH,
 ) -> int:
     """Insert a signal and return its row id."""
@@ -113,11 +153,17 @@ def log_signal(
         cur = conn.execute(
             """INSERT INTO signals
                (game_title, event_slug, team, side, poly_price, book_prob,
-                edge_pct, kelly_size, token_id, bookmakers_count, commence_time, created_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                edge_pct, kelly_size, token_id, bookmakers_count, consensus_std,
+                commence_time, created_at,
+                market_type, calibration_edge_pct, expected_win_rate,
+                price_band, in_sweet_spot, band_confidence, strategy_mode)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 game_title, event_slug, team, side, poly_price, book_prob,
-                edge_pct, kelly_size, token_id, bookmakers_count, commence_time, now,
+                edge_pct, kelly_size, token_id, bookmakers_count, consensus_std,
+                commence_time, now,
+                market_type, calibration_edge_pct, expected_win_rate,
+                price_band, int(in_sweet_spot), band_confidence, strategy_mode,
             ),
         )
         conn.commit()
