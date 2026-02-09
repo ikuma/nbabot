@@ -6,5 +6,8 @@ dist/
 .env
 *.db
 data/reports/*.md
+data/reports/*/
+data/traders/
+data/logs/
 .ruff_cache/
 .pytest_cache/
