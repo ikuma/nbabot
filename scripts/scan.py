@@ -54,6 +54,7 @@ def _run_bookmaker(args, games, moneylines):
 
 def _run_calibration(args, moneylines):
     """Run calibration-based scan."""
+    from src.config import settings
     from src.notifications.telegram import format_opportunities, send_message
     from src.store.db import log_signal
     from src.strategy.calibration_scanner import scan_calibration
@@ -61,7 +62,16 @@ def _run_calibration(args, moneylines):
     opportunities = scan_calibration(moneylines)
     log.info("[calibration] Found %d opportunities above edge threshold", len(opportunities))
 
-    if not args.dry_run and opportunities:
+    # 実行モード判定
+    execution_mode = getattr(args, "execution", None) or settings.execution_mode
+
+    # live モードでは _execute_live_orders が DB 記録 + 発注を一括で行う
+    if execution_mode == "live" and opportunities and not args.dry_run:
+        _execute_live_orders(opportunities)
+    elif execution_mode == "dry-run" and opportunities:
+        _execute_dry_run(opportunities)
+    elif not args.dry_run and opportunities:
+        # paper モード: シグナルのみ DB 記録
         for opp in opportunities:
             signal_id = log_signal(
                 game_title=opp.event_title,
@@ -93,6 +103,169 @@ def _run_calibration(args, moneylines):
     msg = format_opportunities(opportunities)
     send_message(msg)
     return opportunities
+
+
+def _preflight_checks() -> bool:
+    """Run pre-trade checks. Returns True if all pass."""
+    from datetime import date
+
+    from src.config import settings
+    from src.connectors.polymarket import get_usdc_balance
+    from src.store.db import get_todays_exposure, get_todays_live_orders
+
+    # 1. 秘密鍵チェック
+    if not settings.polymarket_private_key:
+        log.error("[preflight] POLYMARKET_PRIVATE_KEY not set")
+        return False
+
+    # 2. USDC 残高チェック
+    try:
+        balance = get_usdc_balance()
+        log.info("[preflight] USDC balance: $%.2f", balance)
+        if balance < settings.min_balance_usd:
+            log.error(
+                "[preflight] Balance $%.2f < minimum $%.2f",
+                balance, settings.min_balance_usd,
+            )
+            return False
+    except Exception:
+        log.exception("[preflight] Failed to check balance")
+        return False
+
+    # 3. 日次発注数チェック
+    today_str = date.today().strftime("%Y-%m-%d")
+    order_count = get_todays_live_orders(today_str)
+    if order_count >= settings.max_daily_positions:
+        log.error(
+            "[preflight] Daily order limit reached: %d/%d",
+            order_count, settings.max_daily_positions,
+        )
+        return False
+
+    # 4. 日次エクスポージャーチェック
+    exposure = get_todays_exposure(today_str)
+    if exposure >= settings.max_daily_exposure_usd:
+        log.error(
+            "[preflight] Daily exposure limit reached: $%.0f/$%.0f",
+            exposure, settings.max_daily_exposure_usd,
+        )
+        return False
+
+    log.info(
+        "[preflight] OK — balance=$%.2f, orders=%d/%d, exposure=$%.0f/$%.0f",
+        balance, order_count, settings.max_daily_positions,
+        exposure, settings.max_daily_exposure_usd,
+    )
+    return True
+
+
+def _execute_live_orders(opportunities: list) -> None:
+    """Place real orders for calibration opportunities."""
+    from datetime import date
+
+    from src.config import settings
+    from src.connectors.polymarket import place_limit_buy
+    from src.notifications.telegram import send_message
+    from src.store.db import get_todays_live_orders, update_order_status
+
+    if not _preflight_checks():
+        log.warning("[live] Preflight failed, skipping all orders")
+        send_message("[LIVE] Preflight checks failed — no orders placed")
+        return
+
+    today_str = date.today().strftime("%Y-%m-%d")
+    placed = 0
+
+    for opp in opportunities:
+        # 日次上限チェック (ループ中もチェック)
+        if get_todays_live_orders(today_str) >= settings.max_daily_positions:
+            log.warning("[live] Daily position limit reached, stopping")
+            break
+
+        # 重複チェック: 同じ event_slug + 今日で発注済みならスキップ
+        from src.store.db import _connect
+
+        conn = _connect()
+        try:
+            dup = conn.execute(
+                """SELECT COUNT(*) FROM signals
+                   WHERE event_slug = ? AND order_status NOT IN ('paper', 'failed')
+                   AND created_at LIKE ?""",
+                (opp.event_slug, f"{today_str}%"),
+            ).fetchone()[0]
+        finally:
+            conn.close()
+
+        if dup > 0:
+            log.info("[live] Skipping duplicate: %s", opp.event_slug)
+            continue
+
+        # シグナルを DB に記録 (order_status は後で更新)
+        from src.store.db import log_signal
+
+        signal_id = log_signal(
+            game_title=opp.event_title,
+            event_slug=opp.event_slug,
+            team=opp.outcome_name,
+            side=opp.side,
+            poly_price=opp.poly_price,
+            book_prob=opp.book_prob or 0.0,
+            edge_pct=opp.calibration_edge_pct,
+            kelly_size=opp.position_usd,
+            token_id=opp.token_id,
+            market_type=opp.market_type,
+            calibration_edge_pct=opp.calibration_edge_pct,
+            expected_win_rate=opp.expected_win_rate,
+            price_band=opp.price_band,
+            in_sweet_spot=opp.in_sweet_spot,
+            band_confidence=opp.band_confidence,
+            strategy_mode="calibration",
+        )
+
+        size_usd = min(opp.position_usd, settings.max_position_usd)
+
+        try:
+            result = place_limit_buy(opp.token_id, opp.poly_price, size_usd)
+            order_id = result.get("orderID") or result.get("id", "")
+            update_order_status(signal_id, order_id, "placed")
+            placed += 1
+            log.info(
+                "[live] Order placed #%d: BUY %s @ %.3f $%.0f order_id=%s",
+                signal_id, opp.outcome_name, opp.poly_price, size_usd, order_id,
+            )
+            send_message(
+                f"[LIVE] BUY {opp.outcome_name} @ {opp.poly_price:.3f}"
+                f" ${size_usd:.0f} | {opp.event_title}"
+                f" | edge={opp.calibration_edge_pct:.1f}%"
+            )
+        except Exception:
+            update_order_status(signal_id, None, "failed")
+            log.exception("[live] Order failed for %s", opp.outcome_name)
+            send_message(f"[LIVE] ORDER FAILED: {opp.outcome_name} @ {opp.poly_price:.3f}")
+
+    log.info("[live] Placed %d/%d orders", placed, len(opportunities))
+
+
+def _execute_dry_run(opportunities: list) -> None:
+    """Log what would be placed without submitting orders."""
+    from src.config import settings
+
+    log.info("[dry-run] Would place %d orders:", len(opportunities))
+    total = 0.0
+    for opp in opportunities:
+        size = min(opp.position_usd, settings.max_position_usd)
+        total += size
+        log.info(
+            "[dry-run]   BUY %s @ %.3f $%.0f | %s | edge=%.1f%%",
+            opp.outcome_name, opp.poly_price, size,
+            opp.event_title, opp.calibration_edge_pct,
+        )
+    log.info("[dry-run] Total exposure: $%.0f", total)
+
+    if _preflight_checks():
+        log.info("[dry-run] Preflight checks: PASS")
+    else:
+        log.warning("[dry-run] Preflight checks: FAIL")
 
 
 def _format_report_calibration(opps: list) -> list[str]:
@@ -171,10 +344,27 @@ def main():
         default=None,
         help="Scan mode (default: from settings.strategy_mode)",
     )
+    parser.add_argument(
+        "--execution",
+        choices=["paper", "live", "dry-run"],
+        default=None,
+        help="Execution mode (default: from settings.execution_mode)",
+    )
+    parser.add_argument(
+        "--scan-date",
+        type=str,
+        default=None,
+        help="Scan date YYYY-MM-DD (default: today)",
+    )
     args = parser.parse_args()
 
     mode = args.mode or settings.strategy_mode
-    log.info("=== NBA Edge Scanner (mode=%s) ===", mode)
+    exec_mode = args.execution or settings.execution_mode
+    scan_date = args.scan_date
+    log.info(
+        "=== NBA Edge Scanner (mode=%s, execution=%s, date=%s) ===",
+        mode, exec_mode, scan_date or "today",
+    )
 
     if args.dry_run:
         log.info("--dry-run: skipping DB signal logging")
@@ -200,13 +390,16 @@ def main():
         log.info("Fetching Polymarket moneyline markets...")
         moneylines = fetch_all_moneylines(games)
     else:
-        from src.connectors.nba_schedule import fetch_todays_games
+        from src.connectors.nba_schedule import fetch_games_for_date, fetch_todays_games
         from src.connectors.polymarket_discovery import fetch_all_nba_moneylines
 
         log.info("Fetching NBA schedule from NBA.com...")
-        nba_games = fetch_todays_games()
-        log.info("NBA.com: %d games today", len(nba_games))
-        moneylines = fetch_all_nba_moneylines()
+        if scan_date:
+            nba_games = fetch_games_for_date(scan_date)
+        else:
+            nba_games = fetch_todays_games()
+        log.info("NBA.com: %d games for %s", len(nba_games), scan_date or "today")
+        moneylines = fetch_all_nba_moneylines(target_date=scan_date)
 
     log.info("Moneyline events found: %d", len(moneylines))
 
@@ -225,11 +418,13 @@ def main():
 
     # Generate report
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    report_date = scan_date or today
     report_dir = Path(__file__).resolve().parent.parent / "data" / "reports"
     report_dir.mkdir(parents=True, exist_ok=True)
-    report_path = report_dir / f"{today}.md"
+    report_path = report_dir / f"{report_date}.md"
 
-    lines = [f"# NBA Edge Report {today} (mode={mode})\n"]
+    date_label = f"{report_date} (scanned {today})" if scan_date else today
+    lines = [f"# NBA Edge Report {date_label} (mode={mode})\n"]
     if games:
         lines.append(f"Games with odds: {len(games)} | Moneyline events found: {len(moneylines)}\n")
     elif nba_games:
