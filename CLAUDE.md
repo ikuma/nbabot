@@ -1,5 +1,11 @@
 # nbabot
 
+## 言語設定
+
+- **応答は必ず日本語で行う**。コード内のコメント・docstring は英語 OK（コーディング規約に従う）。
+
+## 概要
+
 Polymarket NBA キャリブレーション Bot。Polymarket の構造的ミスプライシング（価格帯ごとの系統的な過小評価）を校正テーブルで検出し、広く刈り取る戦略。
 
 ## 戦略の変遷
@@ -34,6 +40,9 @@ nbabot/
 │   │   └── telegram.py               # Telegram 通知
 │   ├── scheduler/
 │   │   └── trade_scheduler.py        # 試合別タイミング発注 (cron 駆動ステートマシン)
+│   ├── sizing/
+│   │   ├── liquidity.py              # 注文板流動性抽出 (LiquiditySnapshot, extract, score)
+│   │   └── position_sizer.py         # 3層制約サイジング (Kelly×残高×流動性)
 │   ├── analysis/
 │   │   ├── pnl.py                    # 純関数 P&L 計算 (condition/game 単位)
 │   │   └── strategy_profile.py       # 軽量戦略フィンガープリント (Sharpe, DD 等)
@@ -48,6 +57,7 @@ nbabot/
 │   ├── cron_schedule.sh              # スケジューラー cron ラッパー (5分間隔)
 │   ├── cron_scan.sh                  # 旧 cron ラッパー (無効化済み・手動用)
 │   ├── check_balance.py              # API 接続確認
+│   ├── survey_liquidity.py           # NBA マーケット流動性調査
 │   ├── discover_traders.py           # リーダーボードからトレーダー発見
 │   ├── fetch_trader.py               # 任意トレーダーの取引データ取得
 │   ├── analyze_trader.py             # P&L + 戦略プロファイル分析
@@ -110,9 +120,10 @@ scripts/schedule_trades.py
      ├── 3. process_eligible_jobs()
      │   execute_after <= now < execute_before かつ status=pending
      │     → Gamma API で最新価格取得
-     │     → scan_calibration() で EV 判定
+     │     → CLOB API で注文板取得 (流動性チェック有効時)
+     │     → scan_calibration() で EV 判定 (3層制約: Kelly×残高×流動性)
      │     → 正の EV なら発注 (mode に応じて paper/live)
-     │     → signal_id を trade_jobs に紐付け
+     │     → signal_id を trade_jobs に紐付け (流動性メタデータ含む)
      │
      ├── 4. auto_settle()
      │
@@ -196,6 +207,10 @@ Gamma Events API ──→ MoneylineMarket[] ──────────┤
 | `MAX_POSITION_USD` | No | 1 取引最大額 (default: 100) |
 | `MAX_DAILY_POSITIONS` | No | 1 日最大ポジション数 (default: 20) |
 | `MAX_DAILY_EXPOSURE_USD` | No | 1 日最大エクスポージャー (default: 2000) |
+| `CAPITAL_RISK_PCT` | No | 残高の最大 N% per position (default: 2.0) |
+| `LIQUIDITY_FILL_PCT` | No | ask depth 5c の最大 N% (default: 10.0) |
+| `MAX_SPREAD_PCT` | No | スプレッド上限 % (default: 10.0, 超えたら skip) |
+| `CHECK_LIQUIDITY` | No | 流動性チェック有効/無効 (default: true) |
 | `SCHEDULE_WINDOW_HOURS` | No | ティップオフ何時間前から発注窓 (default: 2.0) |
 | `SCHEDULE_MAX_RETRIES` | No | 失敗時のリトライ上限 (default: 3) |
 | `MAX_ORDERS_PER_TICK` | No | 1 tick あたりの最大発注数 (default: 3) |

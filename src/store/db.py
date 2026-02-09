@@ -68,6 +68,12 @@ class SignalRecord:
     order_id: str | None = None
     order_status: str = "paper"
     fill_price: float | None = None
+    # 流動性カラム
+    liquidity_score: str = "unknown"
+    ask_depth_5c: float | None = None
+    spread_pct: float | None = None
+    balance_usd_at_trade: float | None = None
+    constraint_binding: str = "kelly"
 
 
 @dataclass
@@ -125,6 +131,7 @@ def _connect(db_path: Path | str = DEFAULT_DB_PATH) -> sqlite3.Connection:
     conn.executescript(TRADE_JOBS_SQL)
     _ensure_calibration_columns(conn)
     _ensure_execution_columns(conn)
+    _ensure_liquidity_columns(conn)
     return conn
 
 
@@ -166,6 +173,25 @@ def _ensure_execution_columns(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+# 流動性メタデータ用カラム (ALTER TABLE パターン)
+_LIQUIDITY_COLUMNS = [
+    ("liquidity_score", "TEXT DEFAULT 'unknown'"),
+    ("ask_depth_5c", "REAL"),
+    ("spread_pct", "REAL"),
+    ("balance_usd_at_trade", "REAL"),
+    ("constraint_binding", "TEXT DEFAULT 'kelly'"),
+]
+
+
+def _ensure_liquidity_columns(conn: sqlite3.Connection) -> None:
+    """Add liquidity columns to signals table if they don't exist."""
+    existing = {row[1] for row in conn.execute("PRAGMA table_info(signals)").fetchall()}
+    for col_name, col_def in _LIQUIDITY_COLUMNS:
+        if col_name not in existing:
+            conn.execute(f"ALTER TABLE signals ADD COLUMN {col_name} {col_def}")
+    conn.commit()
+
+
 def log_signal(
     *,
     game_title: str,
@@ -187,6 +213,11 @@ def log_signal(
     in_sweet_spot: bool = False,
     band_confidence: str = "",
     strategy_mode: str = "bookmaker",
+    liquidity_score: str = "unknown",
+    ask_depth_5c: float | None = None,
+    spread_pct: float | None = None,
+    balance_usd_at_trade: float | None = None,
+    constraint_binding: str = "kelly",
     db_path: Path | str = DEFAULT_DB_PATH,
 ) -> int:
     """Insert a signal and return its row id."""
@@ -199,8 +230,11 @@ def log_signal(
                 edge_pct, kelly_size, token_id, bookmakers_count, consensus_std,
                 commence_time, created_at,
                 market_type, calibration_edge_pct, expected_win_rate,
-                price_band, in_sweet_spot, band_confidence, strategy_mode)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                price_band, in_sweet_spot, band_confidence, strategy_mode,
+                liquidity_score, ask_depth_5c, spread_pct,
+                balance_usd_at_trade, constraint_binding)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                       ?, ?, ?, ?, ?)""",
             (
                 game_title,
                 event_slug,
@@ -222,6 +256,11 @@ def log_signal(
                 int(in_sweet_spot),
                 band_confidence,
                 strategy_mode,
+                liquidity_score,
+                ask_depth_5c,
+                spread_pct,
+                balance_usd_at_trade,
+                constraint_binding,
             ),
         )
         conn.commit()

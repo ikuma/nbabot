@@ -12,7 +12,7 @@ from zoneinfo import ZoneInfo
 import httpx
 
 from src.config import settings
-from src.connectors.team_mapping import build_event_slug, full_name_from_short
+from src.connectors.team_mapping import build_event_slug
 
 logger = logging.getLogger(__name__)
 
@@ -97,17 +97,28 @@ def _get_httpx_client() -> httpx.Client:
     return httpx.Client(proxy=proxy, timeout=30)
 
 
+_authenticated_client = None  # モジュールレベルキャッシュ
+
+
 def _create_client(authenticated: bool = False):
     from py_clob_client.client import ClobClient
 
     _apply_proxy()
     if authenticated and settings.polymarket_private_key:
+        global _authenticated_client
+        if _authenticated_client is not None:
+            return _authenticated_client
+
+        funder = settings.polymarket_funder or None
         client = ClobClient(
             host=settings.polymarket_host,
             key=settings.polymarket_private_key,
             chain_id=settings.polymarket_chain_id,
+            signature_type=settings.polymarket_signature_type,
+            funder=funder,
         )
         client.set_api_creds(client.create_or_derive_api_creds())
+        _authenticated_client = client
         return client
     return ClobClient(host=settings.polymarket_host)
 
@@ -266,10 +277,120 @@ def get_order_book(token_id: str) -> dict[str, Any]:
     return client.get_order_book(token_id)
 
 
+def fetch_order_book_safe(token_id: str) -> dict | None:
+    """Fetch order book with error handling. Returns None on failure."""
+    try:
+        return get_order_book(token_id)
+    except Exception:
+        logger.warning("Failed to fetch order book for token %s", token_id, exc_info=True)
+        return None
+
+
+def fetch_order_books_batch(token_ids: list[str]) -> dict[str, dict]:
+    """Batch fetch order books for multiple tokens.
+
+    Uses individual get_order_book calls (py-clob-client's get_order_books
+    may not be available). Returns {token_id: order_book} for successful fetches.
+    """
+    results: dict[str, dict] = {}
+    for tid in token_ids:
+        book = fetch_order_book_safe(tid)
+        if book is not None:
+            results[tid] = book
+    return results
+
+
 def get_balance() -> dict[str, Any]:
     """Get account USDC balance (requires authentication)."""
+    from py_clob_client.clob_types import AssetType, BalanceAllowanceParams
+
     client = _create_client(authenticated=True)
-    return client.get_balance_allowance(asset_type=0)  # COLLATERAL
+    return client.get_balance_allowance(
+        BalanceAllowanceParams(asset_type=AssetType.COLLATERAL)
+    )
+
+
+def get_usdc_balance() -> float:
+    """Return USDC balance as a float (convenience wrapper)."""
+    raw = get_balance()
+    # py-clob-client returns {"balance": "12345"} in wei-like string
+    balance_str = str(raw.get("balance", "0"))
+    try:
+        return float(balance_str) / 1e6  # USDC has 6 decimals
+    except (ValueError, TypeError):
+        return 0.0
+
+
+def place_limit_buy(token_id: str, price: float, size_usd: float) -> dict:
+    """Place a GTC limit buy order. Returns dict with orderID on success.
+
+    Args:
+        token_id: CLOB token ID for the outcome.
+        price: Limit price (0-1).
+        size_usd: Dollar amount to risk.
+
+    Notes:
+        - SDK auto-resolves tick_size, neg_risk, fee_rate_bps per token.
+        - size は shares 数 (= size_usd / price)。SDK が tick に丸める。
+        - create_and_post_order は OrderArgs → 署名 → POST を一括実行。
+    """
+    import time
+
+    from py_clob_client.clob_types import OrderArgs
+    from py_clob_client.order_builder.constants import BUY
+
+    client = _create_client(authenticated=True)
+
+    # shares = size_usd / price
+    size = round(size_usd / price, 2)
+
+    order_args = OrderArgs(
+        token_id=token_id,
+        price=price,
+        size=size,
+        side=BUY,
+    )
+
+    max_retries = 3
+    for attempt in range(1, max_retries + 1):
+        try:
+            # create_and_post_order = create_order + post_order を一括実行
+            # tick_size, neg_risk, fee_rate_bps は SDK が自動取得
+            resp = client.create_and_post_order(order_args)
+            logger.info(
+                "Order placed: token=%s price=%.3f size=%.2f resp=%s",
+                token_id, price, size, resp,
+            )
+            time.sleep(0.5)  # レート制限対策
+            return resp
+        except Exception:
+            if attempt == max_retries:
+                raise
+            wait = 2 ** attempt
+            logger.warning(
+                "Order attempt %d/%d failed, retrying in %ds",
+                attempt, max_retries, wait,
+            )
+            time.sleep(wait)
+    return {}  # unreachable, for type checker
+
+
+def get_order_status(order_id: str) -> dict:
+    """Get order status from CLOB."""
+    client = _create_client(authenticated=True)
+    return client.get_order(order_id)
+
+
+def cancel_order(order_id: str) -> bool:
+    """Cancel an open order. Returns True on success."""
+    client = _create_client(authenticated=True)
+    try:
+        resp = client.cancel(order_id)
+        logger.info("Order cancelled: %s resp=%s", order_id, resp)
+        return True
+    except Exception:
+        logger.exception("Failed to cancel order %s", order_id)
+        return False
 
 
 # ---------------------------------------------------------------------------

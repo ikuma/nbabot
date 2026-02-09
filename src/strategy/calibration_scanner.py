@@ -16,6 +16,8 @@ from dataclasses import dataclass
 
 from src.config import settings
 from src.connectors.polymarket import MoneylineMarket
+from src.sizing.liquidity import LiquiditySnapshot
+from src.sizing.position_sizer import calculate_position_size
 from src.strategy.calibration import is_in_sweet_spot, lookup_band
 
 logger = logging.getLogger(__name__)
@@ -40,6 +42,10 @@ class CalibrationOpportunity:
     position_usd: float
     side: str = "BUY"
     book_prob: float | None = None  # optional bookmaker validation
+    # Liquidity-aware sizing fields
+    liquidity_score: str = "unknown"
+    constraint_binding: str = "kelly"
+    recommended_execution: str = "immediate"
 
 
 def _calibration_kelly(
@@ -73,6 +79,8 @@ def _ev_per_dollar(expected_win_rate: float, price: float) -> float:
 
 def scan_calibration(
     moneylines: list[MoneylineMarket],
+    balance_usd: float | None = None,
+    liquidity_map: dict[str, LiquiditySnapshot] | None = None,
 ) -> list[CalibrationOpportunity]:
     """Calibration-based scan. No bookmaker odds required.
 
@@ -82,6 +90,7 @@ def scan_calibration(
       3. Require positive EV (expected_win_rate > poly_price)
       4. Select the outcome with higher EV (one signal per game)
       5. Kelly sizing (sweet spot = full, outside = 0.5x)
+      6. Apply 3-layer constraints (kelly, capital, liquidity) if provided
     """
     opportunities: list[CalibrationOpportunity] = []
 
@@ -133,16 +142,49 @@ def scan_calibration(
             if not sweet:
                 kelly *= 0.5
 
-            position_usd = min(kelly * settings.max_position_usd * 10, settings.max_position_usd)
+            kelly_usd = min(kelly * settings.max_position_usd * 10, settings.max_position_usd)
 
             band_label = f"{band.price_lo:.2f}-{band.price_hi:.2f}"
+
+            # 3層制約の適用
+            liq_score = "unknown"
+            binding = "kelly"
+            rec_exec = "immediate"
+            position_usd = kelly_usd
+
+            token_id = ml.token_ids[i]
+            liq = liquidity_map.get(token_id) if liquidity_map else None
+
+            if balance_usd is not None or liq is not None:
+                sizing = calculate_position_size(
+                    kelly_usd=kelly_usd,
+                    balance_usd=balance_usd,
+                    liquidity=liq,
+                    max_position_usd=settings.max_position_usd,
+                    capital_risk_pct=settings.capital_risk_pct,
+                    liquidity_fill_pct=settings.liquidity_fill_pct,
+                    max_spread_pct=settings.max_spread_pct,
+                )
+                position_usd = sizing.final_size_usd
+                liq_score = sizing.liquidity_score
+                binding = sizing.constraint_binding
+                rec_exec = sizing.recommended_execution
+
+                if rec_exec == "skip":
+                    logger.info(
+                        "Skipping %s: %s (spread=%.1f%%)",
+                        outcome_name,
+                        liq_score,
+                        liq.spread_pct if liq else 0,
+                    )
+                    continue
 
             candidate = CalibrationOpportunity(
                 event_slug=ml.event_slug,
                 event_title=ml.event_title,
                 market_type="moneyline",
                 outcome_name=outcome_name,
-                token_id=ml.token_ids[i],
+                token_id=token_id,
                 poly_price=price,
                 calibration_edge_pct=edge_pct,
                 expected_win_rate=expected_wr,
@@ -151,6 +193,9 @@ def scan_calibration(
                 in_sweet_spot=sweet,
                 band_confidence=band.confidence,
                 position_usd=position_usd,
+                liquidity_score=liq_score,
+                constraint_binding=binding,
+                recommended_execution=rec_exec,
             )
 
             # 1 試合 1 シグナル: EV が最も高いアウトカムを選択

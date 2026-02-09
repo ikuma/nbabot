@@ -55,6 +55,12 @@ class Settings(BaseSettings):
     # === Odds API validation ===
     use_odds_api_validation: bool = False  # bookmaker cross-check
 
+    # === Sizing ===
+    capital_risk_pct: float = 2.0  # 残高の最大 N% per position
+    liquidity_fill_pct: float = 10.0  # ask depth 5c の最大 N%
+    max_spread_pct: float = 10.0  # スプレッド上限 % (超えたら skip)
+    check_liquidity: bool = True  # 流動性チェック有効/無効
+
     # === Scheduler ===
     schedule_window_hours: float = 2.0  # ティップオフ何時間前から発注窓
     schedule_max_retries: int = 3  # 失敗時のリトライ上限

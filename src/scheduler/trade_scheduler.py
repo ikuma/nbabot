@@ -267,8 +267,40 @@ def _process_single_job(
             logger.info("Job %d (%s): no moneyline → skipped", job.id, job.event_slug)
             return JobResult(job.id, job.event_slug, "skipped")
 
-        # EV 判定
-        opps = scan_calibration([ml])
+        # 注文板取得 + 流動性抽出 (check_liquidity=True の場合)
+        from src.connectors.polymarket import (
+            fetch_order_books_batch as _fetch_obs,
+        )
+        from src.sizing.liquidity import LiquiditySnapshot
+        from src.sizing.liquidity import extract_liquidity as _extract
+
+        liquidity_map: dict[str, LiquiditySnapshot] | None = None
+        balance_usd: float | None = None
+
+        if settings.check_liquidity and ml.token_ids:
+            try:
+                order_books = _fetch_obs(ml.token_ids)
+                if order_books:
+                    liquidity_map = {}
+                    for tid, book in order_books.items():
+                        snap = _extract(book, tid)
+                        if snap:
+                            liquidity_map[tid] = snap
+                    if not liquidity_map:
+                        liquidity_map = None
+            except Exception:
+                logger.warning("Order book fetch failed for %s, proceeding without", job.event_slug)
+
+        # 残高取得 (live モードのみ — preflight より前倒し)
+        if execution_mode == "live":
+            try:
+                from src.connectors.polymarket import get_usdc_balance
+                balance_usd = get_usdc_balance()
+            except Exception:
+                logger.warning("Balance fetch failed for %s", job.event_slug)
+
+        # EV 判定 (3層制約付き)
+        opps = scan_calibration([ml], balance_usd=balance_usd, liquidity_map=liquidity_map)
         if not opps:
             update_job_status(
                 job.id,
@@ -290,14 +322,21 @@ def _process_single_job(
                 db_path=db_path,
             )
             logger.info(
-                "[dry-run] Job %d: BUY %s @ %.3f $%.0f edge=%.1f%%",
+                "[dry-run] Job %d: BUY %s @ %.3f $%.0f edge=%.1f%% liq=%s bind=%s",
                 job.id,
                 opp.outcome_name,
                 opp.poly_price,
                 opp.position_usd,
                 opp.calibration_edge_pct,
+                opp.liquidity_score,
+                opp.constraint_binding,
             )
             return JobResult(job.id, job.event_slug, "skipped")
+
+        # 流動性メタデータを抽出
+        _liq_snap = liquidity_map.get(opp.token_id) if liquidity_map else None
+        _ask_depth = _liq_snap.ask_depth_5c if _liq_snap else None
+        _spread = _liq_snap.spread_pct if _liq_snap else None
 
         # paper or live: シグナルを DB に記録
         signal_id = log_signal(
@@ -317,6 +356,11 @@ def _process_single_job(
             in_sweet_spot=opp.in_sweet_spot,
             band_confidence=opp.band_confidence,
             strategy_mode="calibration",
+            liquidity_score=opp.liquidity_score,
+            ask_depth_5c=_ask_depth,
+            spread_pct=_spread,
+            balance_usd_at_trade=balance_usd,
+            constraint_binding=opp.constraint_binding,
             db_path=db_path,
         )
 
@@ -334,17 +378,23 @@ def _process_single_job(
                 return JobResult(job.id, job.event_slug, "failed", signal_id, "preflight failed")
 
             size_usd = min(opp.position_usd, settings.max_position_usd)
+            # best_ask 価格で発注 (注文板データがあれば)、なければ midpoint フォールバック
+            order_price = opp.poly_price
+            if _liq_snap and _liq_snap.best_ask > 0:
+                order_price = _liq_snap.best_ask
             try:
-                resp = place_limit_buy(opp.token_id, opp.poly_price, size_usd)
+                resp = place_limit_buy(opp.token_id, order_price, size_usd)
                 order_id = resp.get("orderID") or resp.get("id", "")
                 update_order_status(signal_id, order_id, "placed", db_path=db_path)
                 logger.info(
-                    "[live] Job %d: BUY %s @ %.3f $%.0f order=%s",
+                    "[live] Job %d: BUY %s @ %.3f $%.0f order=%s (liq=%s, bind=%s)",
                     job.id,
                     opp.outcome_name,
-                    opp.poly_price,
+                    order_price,
                     size_usd,
                     order_id,
+                    opp.liquidity_score,
+                    opp.constraint_binding,
                 )
             except Exception as e:
                 update_order_status(signal_id, None, "failed", db_path=db_path)
