@@ -1,7 +1,9 @@
 """Calibration table and lookup functions for Polymarket mispricing detection.
 
-Based on lhtsports NBA ML analysis: Polymarket systematically underprices
-outcomes in the 0.25-0.55 range (implied prob 25-40% vs actual win rate 72-80%).
+Based on lhtsports NBA ML analysis (2024-12 to 2026-02, 1,395 settled conditions).
+Uniform 5-cent bands. Prices below 0.20 are excluded (< 0.20 bands have
+win rate 12-36% and cumulative P&L deeply negative).
+MERGED conditions are excluded from win rate calculation.
 """
 
 from __future__ import annotations
@@ -21,19 +23,27 @@ class CalibrationBand:
     confidence: str  # "high" | "medium" | "low"
 
 
-# lhtsports NBA ML 分析から導出した初期テーブル (agent2-summary.json)
+# lhtsports NBA ML 全データ (2024-12 〜 2026-02, 1,395 settled conditions)
+# 5-cent uniform bands, 0.20-0.95 range
+# MERGED 除外、WIN/LOSS_OR_OPEN のみで勝率算出
 NBA_ML_CALIBRATION: list[CalibrationBand] = [
-    CalibrationBand(0.05, 0.15, 0.270, -15.6, 50, "low"),
-    CalibrationBand(0.15, 0.25, 0.430, -5.0, 200, "low"),
-    CalibrationBand(0.25, 0.30, 0.715, 30.0, 92, "high"),
-    CalibrationBand(0.30, 0.35, 0.650, 12.0, 150, "high"),
-    CalibrationBand(0.35, 0.40, 0.795, 8.0, 172, "high"),
-    CalibrationBand(0.40, 0.45, 0.750, 5.0, 200, "high"),
-    CalibrationBand(0.45, 0.50, 0.800, 3.0, 300, "high"),
-    CalibrationBand(0.50, 0.55, 0.849, 2.0, 849, "high"),
-    CalibrationBand(0.55, 0.65, 0.880, -1.0, 360, "medium"),
-    CalibrationBand(0.65, 0.75, 0.920, 2.0, 200, "medium"),
-    CalibrationBand(0.75, 0.85, 0.960, 1.0, 100, "medium"),
+    # === Sweet spot (0.20-0.55): フル Kelly ===
+    CalibrationBand(0.20, 0.25, 0.711, 30.3, 45, "medium"),
+    CalibrationBand(0.25, 0.30, 0.852, 54.5, 54, "medium"),
+    CalibrationBand(0.30, 0.35, 0.822, 20.0, 73, "medium"),
+    CalibrationBand(0.35, 0.40, 0.904, 26.1, 104, "high"),
+    CalibrationBand(0.40, 0.45, 0.917, 7.4, 121, "high"),
+    CalibrationBand(0.45, 0.50, 0.938, 5.9, 162, "high"),
+    CalibrationBand(0.50, 0.55, 0.947, 6.2, 169, "high"),
+    # === Outside sweet spot: 0.5x Kelly ===
+    CalibrationBand(0.55, 0.60, 0.957, 4.0, 141, "high"),
+    CalibrationBand(0.60, 0.65, 0.974, 16.0, 78, "medium"),
+    CalibrationBand(0.65, 0.70, 0.931, 2.1, 58, "medium"),
+    CalibrationBand(0.70, 0.75, 0.933, 15.5, 45, "medium"),
+    CalibrationBand(0.75, 0.80, 0.973, 15.9, 37, "low"),
+    CalibrationBand(0.80, 0.85, 1.000, 17.4, 33, "low"),
+    CalibrationBand(0.85, 0.90, 1.000, 14.1, 30, "low"),
+    CalibrationBand(0.90, 0.95, 1.000, 8.8, 22, "low"),
 ]
 
 
@@ -50,6 +60,6 @@ def lookup_band(
     return None
 
 
-def is_in_sweet_spot(price: float, lo: float = 0.25, hi: float = 0.55) -> bool:
+def is_in_sweet_spot(price: float, lo: float = 0.20, hi: float = 0.55) -> bool:
     """Check if a price falls within the high-edge sweet spot."""
     return lo <= price <= hi

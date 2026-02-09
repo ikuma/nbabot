@@ -73,24 +73,16 @@ def _ev_per_dollar(expected_win_rate: float, price: float) -> float:
 
 def scan_calibration(
     moneylines: list[MoneylineMarket],
-    *,
-    min_price: float | None = None,
-    max_price: float | None = None,
-    min_edge_pct: float | None = None,
 ) -> list[CalibrationOpportunity]:
     """Calibration-based scan. No bookmaker odds required.
 
     For each game:
       1. Compute calibration EV for both outcomes
-      2. Filter by price band (min_price <= poly_price <= max_price)
-      3. Select the outcome with higher EV (one signal per game)
-      4. Require calibration_edge >= min_edge_pct
-      5. Kelly sizing (sweet spot = normal, outside = 0.5x)
+      2. Require calibration band exists (table coverage: 0.25-0.95)
+      3. Require positive EV (expected_win_rate > poly_price)
+      4. Select the outcome with higher EV (one signal per game)
+      5. Kelly sizing (sweet spot = full, outside = 0.5x)
     """
-    lo = min_price if min_price is not None else settings.min_buy_price
-    hi = max_price if max_price is not None else settings.max_buy_price
-    threshold = min_edge_pct if min_edge_pct is not None else settings.min_calibration_edge_pct
-
     opportunities: list[CalibrationOpportunity] = []
 
     for ml in moneylines:
@@ -111,10 +103,6 @@ def scan_calibration(
                 logger.debug("Skipping %s: invalid price %.3f", outcome_name, price)
                 continue
 
-            # 価格帯フィルター
-            if price < lo or price > hi:
-                continue
-
             band = lookup_band(price)
             if band is None:
                 logger.debug("No calibration band for %s @ %.3f", outcome_name, price)
@@ -124,17 +112,18 @@ def scan_calibration(
             edge = expected_wr - price  # raw edge (0-1 scale)
             edge_pct = edge * 100
 
-            # 最低エッジ閾値
-            if edge_pct < threshold:
+            ev = _ev_per_dollar(expected_wr, price)
+
+            # 正の EV のみ
+            if ev <= 0:
                 logger.debug(
-                    "Edge below threshold for %s: %.1f%% < %.1f%%",
+                    "Non-positive EV for %s: %.3f (wr=%.3f, price=%.3f)",
                     outcome_name,
-                    edge_pct,
-                    threshold,
+                    ev,
+                    expected_wr,
+                    price,
                 )
                 continue
-
-            ev = _ev_per_dollar(expected_wr, price)
 
             # Kelly sizing
             kelly = _calibration_kelly(expected_wr, price)
@@ -172,5 +161,5 @@ def scan_calibration(
         if best is not None:
             opportunities.append(best)
 
-    opportunities.sort(key=lambda o: o.calibration_edge_pct, reverse=True)
+    opportunities.sort(key=lambda o: o.ev_per_dollar, reverse=True)
     return opportunities

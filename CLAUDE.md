@@ -2,18 +2,18 @@
 
 Polymarket NBA キャリブレーション Bot。Polymarket の構造的ミスプライシング（価格帯ごとの系統的な過小評価）を校正テーブルで検出し、広く刈り取る戦略。
 
-## 戦略概要
+## 戦略の変遷
 
-**主戦略: キャリブレーション (calibration)**
-- Polymarket は価格帯 0.25-0.55 のアウトカムを系統的に過小評価している (暗示確率 25-40% → 実勝率 72-80%)
+### 旧方針: ブックメーカー乖離 (bookmaker divergence)
+初期構想はブックメーカーコンセンサス (The Odds API) と Polymarket 価格の乖離を検出するテンポラルアービトラージだった。
+しかし lhtsports の P&L 深掘り分析により、ブックメーカーオッズとの差分よりも **Polymarket 自体の構造的ミスプライシング** のほうがはるかに大きく安定したエッジ源であることが判明。
+旧方式は `--mode bookmaker` で引き続き利用可能だが、主戦略は校正モードに完全移行済み。
+
+### 現行方針: キャリブレーション (calibration) — 主戦略
+- Polymarket は価格帯 0.20-0.55 のアウトカムを系統的に過小評価している (暗示確率 20-40% → 実勝率 71-90%)
 - lhtsports の実績データ ($38.7M リスク → +$1.2M, ROI 3.11%) から導出した校正テーブルで期待勝率を推定
 - 各試合で両アウトカムの EV/$ を比較し、高い方を 1 つだけ購入
 - 予測モデル不要 — 価格帯ベースの構造的エッジ
-
-**副戦略: ブックメーカー乖離 (bookmaker) — レガシー**
-- ブックメーカーコンセンサス vs Polymarket の乖離を検出する従来方式
-- `--mode bookmaker` で引き続き利用可能
-- 校正モードの高確信シグナルの追加検証に活用予定 (Phase 4)
 
 ## プロジェクト構成
 
@@ -22,9 +22,10 @@ nbabot/
 ├── src/
 │   ├── config.py                     # Pydantic Settings (.env 読込)
 │   ├── connectors/
-│   │   ├── odds_api.py               # The Odds API (オプション — ゲームリスト取得・検証用)
+│   │   ├── nba_schedule.py           # NBA.com スコアボード (ゲーム発見 + スコア取得)
+│   │   ├── odds_api.py               # The Odds API (レガシー — bookmaker モード用)
 │   │   ├── polymarket.py             # Polymarket Gamma/CLOB API
-│   │   └── team_mapping.py           # チーム名 ↔ Polymarket slug 変換
+│   │   └── team_mapping.py           # チーム名 ↔ abbr ↔ slug 変換
 │   ├── strategy/
 │   │   ├── calibration.py            # 校正テーブル (CalibrationBand, lookup)
 │   │   ├── calibration_scanner.py    # 校正ベーススキャナー (主戦略)
@@ -37,6 +38,8 @@ nbabot/
 │       └── db.py                     # SQLite (シグナル・結果ログ)
 ├── scripts/
 │   ├── scan.py                       # 日次エッジスキャン (メインエントリ)
+│   ├── settle.py                     # 決済 (--auto: 自動 / interactive: 手動)
+│   ├── cron_scan.sh                  # cron 用ラッパー (scan + auto-settle)
 │   └── check_balance.py              # API 接続確認
 ├── agents/                           # エージェントプロンプト
 ├── data/reports/                     # 日次レポート出力先 (.gitignore 対象)
@@ -52,6 +55,10 @@ nbabot/
 - **依存インストール**: `pip install -e .` (venv 推奨)
 - **日次スキャン**: `python scripts/scan.py` (デフォルト: calibration モード)
 - **モード指定**: `python scripts/scan.py --mode calibration|bookmaker|both`
+- **自動決済**: `python scripts/settle.py --auto` (NBA.com スコア + Polymarket フォールバック)
+- **決済 dry-run**: `python scripts/settle.py --auto --dry-run`
+- **手動決済**: `python scripts/settle.py` (interactive)
+- **未決済一覧**: `python scripts/settle.py --list`
 - **接続確認**: `python scripts/check_balance.py`
 - **テスト**: `pytest`
 - **リント**: `ruff check src/ scripts/`
@@ -71,7 +78,7 @@ nbabot/
 ### Calibration モード (主戦略)
 
 ```
-Odds API ──→ GameOdds[] ──→ ゲームリスト (discovery)
+NBA.com Scoreboard ──→ NBAGame[] ──→ ゲームリスト + スコア
                                     │
 Gamma Events API ──→ MoneylineMarket[] ──→ 両アウトカム価格
                                     │
@@ -85,7 +92,27 @@ Gamma Events API ──→ MoneylineMarket[] ──→ 両アウトカム価格
                                     │
                       ┌─────────────┼─────────────┐
                       ↓             ↓             ↓
-                レポート (.md)  Telegram 通知   (stdout)
+                レポート (.md)  Telegram 通知  SQLite 記録
+```
+
+### Auto-Settle フロー
+
+```
+get_unsettled() ──→ SignalRecord[]
+                         │
+                    event_slug をパース
+                    (away_abbr, home_abbr, date)
+                         │
+          ┌──────────────┼──────────────┐
+          │ slug日付 == 今日             │ slug日付 ≠ 今日
+          ↓                             ↓
+   NBA.com スコアボード            Gamma Events API
+   game_status==3 のみ            active==false かつ
+   スコアから勝者判定              price >= 0.95 で判定
+          │                             │
+          └──────────────┬──────────────┘
+                         ↓
+              PnL 計算 → log_result() → Telegram
 ```
 
 ### Bookmaker モード (レガシー)
@@ -112,15 +139,14 @@ Gamma Events API ──→ MoneylineMarket[] ──────────┤
 
 | 変数 | 必須 | 説明 |
 |------|------|------|
-| `ODDS_API_KEY` | Yes* | The Odds API キー (*Phase 2 で optional 化予定) |
+| `ODDS_API_KEY` | No* | The Odds API キー (*bookmaker モードのみ) |
 | `HTTP_PROXY` | geo 制限時 | Polymarket 用プロキシ (`socks5://...`) |
 | `POLYMARKET_PRIVATE_KEY` | 取引時 | Polygon ウォレット秘密鍵 |
 | `TELEGRAM_BOT_TOKEN` | 通知時 | Telegram Bot トークン |
 | `TELEGRAM_CHAT_ID` | 通知時 | 通知先チャット ID |
 | `STRATEGY_MODE` | No | `calibration` (default) / `bookmaker` |
-| `MIN_BUY_PRICE` | No | 校正モード最低購入価格 (default: 0.20) |
-| `MAX_BUY_PRICE` | No | 校正モード最高購入価格 (default: 0.85) |
-| `MIN_CALIBRATION_EDGE_PCT` | No | 校正エッジ最低閾値 % (default: 3.0) |
+| `SWEET_SPOT_LO` | No | スイートスポット下限 (default: 0.20, フル Kelly) |
+| `SWEET_SPOT_HI` | No | スイートスポット上限 (default: 0.55, 超えると 0.5x Kelly) |
 | `MIN_EDGE_PCT` | No | bookmaker モード最小エッジ閾値 % (default: 1.0) |
 | `KELLY_FRACTION` | No | Kelly 分数 (default: 0.25) |
 | `MAX_POSITION_USD` | No | 1 取引最大額 (default: 100) |
@@ -152,8 +178,9 @@ Gamma Events API ──→ MoneylineMarket[] ──────────┤
 - `py-clob-client` は CLOB フォールバック専用。Events API パスでは不要 (lazy import 済み)。
 - `data/reports/*.md` は `.gitignore` 対象。
 - Polymarket は地域制限あり。日本からは `HTTP_PROXY` が必要な場合がある。
-- Odds API 無料枠は月 500 リクエスト。calibration モードではゲームリスト取得のみに使用 (1 回/日)。
+- Odds API は **calibration モードでは不要**。NBA.com スコアボードでゲーム発見。bookmaker モードのみ使用。
 - 校正スキャナーは BUY シグナルのみ。1 試合で両アウトカムの EV を比較し、高い方を 1 つ選択。
 - Kelly criterion の分数 (default 0.25) でポジションサイジング。フル Kelly は使わない。
-- スイートスポット (0.25-0.55) 内はフル Kelly、外は 0.5x Kelly。
+- スイートスポット (0.20-0.55) 内はフル Kelly、外は 0.5x Kelly。
 - `scanner.py` (bookmaker 乖離) はレガシーモードとして温存。削除しない。
+- Auto-settle は NBA.com スコア (本日分) + Polymarket Gamma API (過去分) の二段構え。

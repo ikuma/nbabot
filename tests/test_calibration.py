@@ -23,9 +23,9 @@ class TestLookupBand:
 
     def test_lower_boundary_inclusive(self):
         """Lower bound is inclusive."""
-        band = lookup_band(0.25)
+        band = lookup_band(0.20)
         assert band is not None
-        assert band.price_lo == 0.25
+        assert band.price_lo == 0.20
 
     def test_upper_boundary_exclusive(self):
         """Upper bound is exclusive — 0.30 falls into [0.30, 0.35)."""
@@ -34,17 +34,32 @@ class TestLookupBand:
         assert band.price_lo == 0.30
         assert band.price_hi == 0.35
 
+    def test_new_low_band(self):
+        """Price 0.22 → band [0.20, 0.25)."""
+        band = lookup_band(0.22)
+        assert band is not None
+        assert band.price_lo == 0.20
+        assert band.price_hi == 0.25
+        assert band.expected_win_rate == 0.711
+
     def test_below_all_bands(self):
         """Price below minimum → None."""
         assert lookup_band(0.01) is None
 
     def test_above_all_bands(self):
-        """Price above maximum → None."""
-        assert lookup_band(0.90) is None
+        """Price above maximum (0.95) → None."""
+        assert lookup_band(0.96) is None
 
     def test_at_exact_upper_bound_of_last_band(self):
-        """Price at 0.85 (upper bound of last band) → None."""
-        assert lookup_band(0.85) is None
+        """Price at 0.95 (upper bound of last band) → None."""
+        assert lookup_band(0.95) is None
+
+    def test_high_favorite_band(self):
+        """Price 0.90 → band [0.90, 0.95)."""
+        band = lookup_band(0.90)
+        assert band is not None
+        assert band.price_lo == 0.90
+        assert band.price_hi == 0.95
 
     def test_mid_band_lookup(self):
         """Price 0.42 → band [0.40, 0.45)."""
@@ -75,13 +90,13 @@ class TestIsInSweetSpot:
         assert is_in_sweet_spot(0.35) is True
 
     def test_at_lower_boundary(self):
-        assert is_in_sweet_spot(0.25) is True
+        assert is_in_sweet_spot(0.20) is True
 
     def test_at_upper_boundary(self):
         assert is_in_sweet_spot(0.55) is True
 
     def test_below_sweet_spot(self):
-        assert is_in_sweet_spot(0.20) is False
+        assert is_in_sweet_spot(0.19) is False
 
     def test_above_sweet_spot(self):
         assert is_in_sweet_spot(0.60) is False

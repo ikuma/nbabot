@@ -4,7 +4,7 @@ from pydantic_settings import BaseSettings
 
 
 class Settings(BaseSettings):
-    model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
+    model_config = {"env_file": ".env", "env_file_encoding": "utf-8", "extra": "ignore"}
 
     # Polymarket
     polymarket_private_key: str = ""
@@ -32,11 +32,8 @@ class Settings(BaseSettings):
 
     # === Calibration strategy ===
     strategy_mode: str = "calibration"  # "calibration" | "bookmaker"
-    min_buy_price: float = 0.20
-    max_buy_price: float = 0.85
-    sweet_spot_lo: float = 0.25
+    sweet_spot_lo: float = 0.20
     sweet_spot_hi: float = 0.55
-    min_calibration_edge_pct: float = 3.0  # minimum calibration edge %
 
     # === Capital management ===
     scan_moneyline: bool = True
