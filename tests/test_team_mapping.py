@@ -2,6 +2,7 @@
 
 from src.connectors.team_mapping import (
     build_event_slug,
+    full_name_from_abbr,
     full_name_from_short,
     get_team_abbr,
     get_team_short_name,
@@ -66,6 +67,23 @@ class TestNormalizeTeamName:
 
     def test_unknown_name_passthrough(self):
         assert normalize_team_name("Unknown Team") == "Unknown Team"
+
+
+class TestFullNameFromAbbr:
+    def test_known_abbrs(self):
+        assert full_name_from_abbr("bos") == "Boston Celtics"
+        assert full_name_from_abbr("nyk") == "New York Knicks"
+        assert full_name_from_abbr("gsw") == "Golden State Warriors"
+        assert full_name_from_abbr("lal") == "Los Angeles Lakers"
+        assert full_name_from_abbr("okc") == "Oklahoma City Thunder"
+
+    def test_case_insensitive(self):
+        assert full_name_from_abbr("BOS") == "Boston Celtics"
+        assert full_name_from_abbr("Nyk") == "New York Knicks"
+
+    def test_unknown(self):
+        assert full_name_from_abbr("xxx") is None
+        assert full_name_from_abbr("") is None
 
 
 class TestBuildEventSlug:

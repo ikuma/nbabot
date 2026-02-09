@@ -62,6 +62,9 @@ for _full, _info in NBA_TEAMS.items():
     for _alias in _info.aliases:
         _SHORT_TO_FULL[_alias.lower()] = _full
 
+# Reverse lookup: abbr -> full_name
+_ABBR_TO_FULL: dict[str, str] = {info.abbr: full for full, info in NBA_TEAMS.items()}
+
 
 # NBA.com team name aliases (shortened city names → canonical full names)
 NBA_NAME_ALIASES: dict[str, str] = {
@@ -87,6 +90,11 @@ def get_team_short_name(full_name: str) -> str | None:
 
 def full_name_from_short(short_name: str) -> str | None:
     return _SHORT_TO_FULL.get(short_name.lower())
+
+
+def full_name_from_abbr(abbr: str) -> str | None:
+    """Reverse lookup: abbreviation (e.g. 'bos') -> full name ('Boston Celtics')."""
+    return _ABBR_TO_FULL.get(abbr.lower())
 
 
 def build_event_slug(away_full: str, home_full: str, date_str: str) -> str | None:

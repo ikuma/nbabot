@@ -20,6 +20,8 @@ class NBAGame:
     away_team: str  # "New York Knicks"
     game_time_utc: str  # ISO 8601 e.g. "2026-02-08T17:30:00Z"
     game_status: int  # 1=scheduled, 2=in-progress, 3=final
+    home_score: int = 0
+    away_score: int = 0
 
 
 def fetch_todays_games() -> list[NBAGame]:
@@ -61,6 +63,8 @@ def fetch_todays_games() -> list[NBAGame]:
                 away_team=away_name,
                 game_time_utc=g.get("gameTimeUTC", ""),
                 game_status=g.get("gameStatus", 0),
+                home_score=home.get("score", 0),
+                away_score=away.get("score", 0),
             )
         )
 
