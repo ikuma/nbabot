@@ -64,6 +64,10 @@ class SignalRecord:
     in_sweet_spot: int = 0
     band_confidence: str = ""
     strategy_mode: str = "bookmaker"
+    # 実弾取引カラム
+    order_id: str | None = None
+    order_status: str = "paper"
+    fill_price: float | None = None
 
 
 @dataclass
@@ -91,6 +95,26 @@ class PerformanceStats:
     sharpe_ratio: float
 
 
+TRADE_JOBS_SQL = """
+CREATE TABLE IF NOT EXISTS trade_jobs (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    game_date       TEXT NOT NULL,
+    event_slug      TEXT NOT NULL UNIQUE,
+    home_team       TEXT NOT NULL,
+    away_team       TEXT NOT NULL,
+    game_time_utc   TEXT NOT NULL,
+    execute_after   TEXT NOT NULL,
+    execute_before  TEXT NOT NULL,
+    status          TEXT NOT NULL DEFAULT 'pending',
+    signal_id       INTEGER,
+    retry_count     INTEGER DEFAULT 0,
+    error_message   TEXT,
+    created_at      TEXT NOT NULL,
+    updated_at      TEXT NOT NULL
+);
+"""
+
+
 def _connect(db_path: Path | str = DEFAULT_DB_PATH) -> sqlite3.Connection:
     """Open (or create) the SQLite database and ensure schema exists."""
     db_path = Path(db_path)
@@ -98,7 +122,9 @@ def _connect(db_path: Path | str = DEFAULT_DB_PATH) -> sqlite3.Connection:
     conn = sqlite3.connect(str(db_path))
     conn.row_factory = sqlite3.Row
     conn.executescript(SCHEMA_SQL)
+    conn.executescript(TRADE_JOBS_SQL)
     _ensure_calibration_columns(conn)
+    _ensure_execution_columns(conn)
     return conn
 
 
@@ -118,6 +144,23 @@ def _ensure_calibration_columns(conn: sqlite3.Connection) -> None:
     """Add calibration columns to signals table if they don't exist."""
     existing = {row[1] for row in conn.execute("PRAGMA table_info(signals)").fetchall()}
     for col_name, col_def in _CALIBRATION_COLUMNS:
+        if col_name not in existing:
+            conn.execute(f"ALTER TABLE signals ADD COLUMN {col_name} {col_def}")
+    conn.commit()
+
+
+# 実弾取引用カラム (ALTER TABLE パターン)
+_EXECUTION_COLUMNS = [
+    ("order_id", "TEXT"),
+    ("order_status", "TEXT DEFAULT 'paper'"),
+    ("fill_price", "REAL"),
+]
+
+
+def _ensure_execution_columns(conn: sqlite3.Connection) -> None:
+    """Add execution columns to signals table if they don't exist."""
+    existing = {row[1] for row in conn.execute("PRAGMA table_info(signals)").fetchall()}
+    for col_name, col_def in _EXECUTION_COLUMNS:
         if col_name not in existing:
             conn.execute(f"ALTER TABLE signals ADD COLUMN {col_name} {col_def}")
     conn.commit()
@@ -159,11 +202,26 @@ def log_signal(
                 price_band, in_sweet_spot, band_confidence, strategy_mode)
                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
-                game_title, event_slug, team, side, poly_price, book_prob,
-                edge_pct, kelly_size, token_id, bookmakers_count, consensus_std,
-                commence_time, now,
-                market_type, calibration_edge_pct, expected_win_rate,
-                price_band, int(in_sweet_spot), band_confidence, strategy_mode,
+                game_title,
+                event_slug,
+                team,
+                side,
+                poly_price,
+                book_prob,
+                edge_pct,
+                kelly_size,
+                token_id,
+                bookmakers_count,
+                consensus_std,
+                commence_time,
+                now,
+                market_type,
+                calibration_edge_pct,
+                expected_win_rate,
+                price_band,
+                int(in_sweet_spot),
+                band_confidence,
+                strategy_mode,
             ),
         )
         conn.commit()
@@ -215,9 +273,7 @@ def get_all_signals(db_path: Path | str = DEFAULT_DB_PATH) -> list[SignalRecord]
     """Return all signals ordered by creation time (newest first)."""
     conn = _connect(db_path)
     try:
-        rows = conn.execute(
-            "SELECT * FROM signals ORDER BY created_at DESC"
-        ).fetchall()
+        rows = conn.execute("SELECT * FROM signals ORDER BY created_at DESC").fetchall()
         return [SignalRecord(**dict(r)) for r in rows]
     finally:
         conn.close()
@@ -227,9 +283,7 @@ def get_all_results(db_path: Path | str = DEFAULT_DB_PATH) -> list[ResultRecord]
     """Return all results ordered by settlement time (newest first)."""
     conn = _connect(db_path)
     try:
-        rows = conn.execute(
-            "SELECT * FROM results ORDER BY settled_at DESC"
-        ).fetchall()
+        rows = conn.execute("SELECT * FROM results ORDER BY settled_at DESC").fetchall()
         return [ResultRecord(**{**dict(r), "won": bool(r["won"])}) for r in rows]
     finally:
         conn.close()
@@ -252,9 +306,7 @@ def get_performance(db_path: Path | str = DEFAULT_DB_PATH) -> PerformanceStats:
         avg_pnl = total_pnl / settled_count if settled_count > 0 else 0.0
 
         # PnL series for drawdown and Sharpe
-        pnl_rows = conn.execute(
-            "SELECT pnl FROM results ORDER BY settled_at ASC"
-        ).fetchall()
+        pnl_rows = conn.execute("SELECT pnl FROM results ORDER BY settled_at ASC").fetchall()
         pnl_series = [float(r[0]) for r in pnl_rows]
 
         max_drawdown = _calc_max_drawdown(pnl_series)
@@ -306,3 +358,298 @@ def _calc_sharpe(pnl_series: list[float], annualize_factor: float = 1.0) -> floa
     if std == 0:
         return 0.0
     return (mean / std) * annualize_factor
+
+
+# ---------------------------------------------------------------------------
+# Execution tracking helpers
+# ---------------------------------------------------------------------------
+
+
+def update_order_status(
+    signal_id: int,
+    order_id: str | None,
+    status: str,
+    fill_price: float | None = None,
+    db_path: Path | str = DEFAULT_DB_PATH,
+) -> None:
+    """Update execution status for a signal."""
+    conn = _connect(db_path)
+    try:
+        conn.execute(
+            "UPDATE signals SET order_id = ?, order_status = ?, fill_price = ? WHERE id = ?",
+            (order_id, status, fill_price, signal_id),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def get_todays_live_orders(
+    date_str: str,
+    db_path: Path | str = DEFAULT_DB_PATH,
+) -> int:
+    """Count live orders placed today (order_status != 'paper')."""
+    conn = _connect(db_path)
+    try:
+        row = conn.execute(
+            """SELECT COUNT(*) FROM signals
+               WHERE order_status NOT IN ('paper', 'failed')
+               AND created_at LIKE ?""",
+            (f"{date_str}%",),
+        ).fetchone()
+        return row[0]
+    finally:
+        conn.close()
+
+
+def get_todays_exposure(
+    date_str: str,
+    db_path: Path | str = DEFAULT_DB_PATH,
+) -> float:
+    """Sum of kelly_size for live orders placed today."""
+    conn = _connect(db_path)
+    try:
+        row = conn.execute(
+            """SELECT COALESCE(SUM(kelly_size), 0) FROM signals
+               WHERE order_status NOT IN ('paper', 'failed', 'cancelled')
+               AND created_at LIKE ?""",
+            (f"{date_str}%",),
+        ).fetchone()
+        return float(row[0])
+    finally:
+        conn.close()
+
+
+def get_placed_orders(
+    db_path: Path | str = DEFAULT_DB_PATH,
+) -> list[SignalRecord]:
+    """Return signals with order_status='placed' (awaiting fill)."""
+    conn = _connect(db_path)
+    try:
+        rows = conn.execute(
+            """SELECT s.* FROM signals s
+               LEFT JOIN results r ON r.signal_id = s.id
+               WHERE r.id IS NULL AND s.order_status = 'placed'
+               ORDER BY s.created_at DESC""",
+        ).fetchall()
+        return [SignalRecord(**dict(r)) for r in rows]
+    finally:
+        conn.close()
+
+
+# ---------------------------------------------------------------------------
+# Trade jobs (per-game scheduler)
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class TradeJob:
+    id: int
+    game_date: str
+    event_slug: str
+    home_team: str
+    away_team: str
+    game_time_utc: str
+    execute_after: str
+    execute_before: str
+    status: str
+    signal_id: int | None
+    retry_count: int
+    error_message: str | None
+    created_at: str
+    updated_at: str
+
+
+@dataclass
+class JobSummary:
+    pending: int = 0
+    executing: int = 0
+    executed: int = 0
+    skipped: int = 0
+    failed: int = 0
+    expired: int = 0
+    cancelled: int = 0
+
+
+def upsert_trade_job(
+    *,
+    game_date: str,
+    event_slug: str,
+    home_team: str,
+    away_team: str,
+    game_time_utc: str,
+    execute_after: str,
+    execute_before: str,
+    db_path: Path | str = DEFAULT_DB_PATH,
+) -> bool:
+    """Insert a trade job or update game time if changed. Returns True if inserted."""
+    now = datetime.now(timezone.utc).isoformat()
+    conn = _connect(db_path)
+    try:
+        # INSERT OR IGNORE で冪等性確保
+        cur = conn.execute(
+            """INSERT OR IGNORE INTO trade_jobs
+               (game_date, event_slug, home_team, away_team, game_time_utc,
+                execute_after, execute_before, status, retry_count, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', 0, ?, ?)""",
+            (
+                game_date,
+                event_slug,
+                home_team,
+                away_team,
+                game_time_utc,
+                execute_after,
+                execute_before,
+                now,
+                now,
+            ),
+        )
+        inserted = cur.rowcount > 0
+
+        if not inserted:
+            # 試合時刻が変わっていたら UPDATE (延期対応)
+            conn.execute(
+                """UPDATE trade_jobs
+                   SET game_time_utc = ?, execute_after = ?, execute_before = ?,
+                       updated_at = ?
+                   WHERE event_slug = ?
+                     AND game_time_utc != ?
+                     AND status IN ('pending', 'failed')""",
+                (game_time_utc, execute_after, execute_before, now, event_slug, game_time_utc),
+            )
+
+        conn.commit()
+        return inserted
+    finally:
+        conn.close()
+
+
+def get_eligible_jobs(
+    now_utc: str,
+    db_path: Path | str = DEFAULT_DB_PATH,
+) -> list[TradeJob]:
+    """Get jobs in the execution window: pending/failed, within window, retry < max."""
+    conn = _connect(db_path)
+    try:
+        rows = conn.execute(
+            """SELECT * FROM trade_jobs
+               WHERE status IN ('pending', 'failed')
+                 AND execute_after <= ?
+                 AND execute_before > ?
+                 AND retry_count < 3
+               ORDER BY game_time_utc ASC""",
+            (now_utc, now_utc),
+        ).fetchall()
+        return [TradeJob(**dict(r)) for r in rows]
+    finally:
+        conn.close()
+
+
+def get_executing_jobs(
+    db_path: Path | str = DEFAULT_DB_PATH,
+) -> list[TradeJob]:
+    """Get jobs stuck in 'executing' state (crash recovery)."""
+    conn = _connect(db_path)
+    try:
+        rows = conn.execute("SELECT * FROM trade_jobs WHERE status = 'executing'").fetchall()
+        return [TradeJob(**dict(r)) for r in rows]
+    finally:
+        conn.close()
+
+
+def update_job_status(
+    job_id: int,
+    status: str,
+    *,
+    signal_id: int | None = None,
+    error_message: str | None = None,
+    increment_retry: bool = False,
+    db_path: Path | str = DEFAULT_DB_PATH,
+) -> None:
+    """Update a trade job's status and optional fields."""
+    now = datetime.now(timezone.utc).isoformat()
+    conn = _connect(db_path)
+    try:
+        if increment_retry:
+            conn.execute(
+                """UPDATE trade_jobs
+                   SET status = ?, signal_id = COALESCE(?, signal_id),
+                       error_message = ?, retry_count = retry_count + 1,
+                       updated_at = ?
+                   WHERE id = ?""",
+                (status, signal_id, error_message, now, job_id),
+            )
+        else:
+            conn.execute(
+                """UPDATE trade_jobs
+                   SET status = ?, signal_id = COALESCE(?, signal_id),
+                       error_message = ?, updated_at = ?
+                   WHERE id = ?""",
+                (status, signal_id, error_message, now, job_id),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def cancel_expired_jobs(
+    now_utc: str,
+    db_path: Path | str = DEFAULT_DB_PATH,
+) -> int:
+    """Mark pending/failed jobs past their execution window as expired."""
+    now = datetime.now(timezone.utc).isoformat()
+    conn = _connect(db_path)
+    try:
+        cur = conn.execute(
+            """UPDATE trade_jobs
+               SET status = 'expired', updated_at = ?
+               WHERE status IN ('pending', 'failed')
+                 AND execute_before <= ?""",
+            (now, now_utc),
+        )
+        conn.commit()
+        return cur.rowcount
+    finally:
+        conn.close()
+
+
+def get_job_summary(
+    game_date: str,
+    db_path: Path | str = DEFAULT_DB_PATH,
+) -> JobSummary:
+    """Get status counts for jobs on a given game date."""
+    conn = _connect(db_path)
+    try:
+        rows = conn.execute(
+            """SELECT status, COUNT(*) as cnt FROM trade_jobs
+               WHERE game_date = ?
+               GROUP BY status""",
+            (game_date,),
+        ).fetchall()
+        summary = JobSummary()
+        for r in rows:
+            status = r["status"]
+            count = r["cnt"]
+            if hasattr(summary, status):
+                setattr(summary, status, count)
+        return summary
+    finally:
+        conn.close()
+
+
+def has_signal_for_slug(
+    event_slug: str,
+    db_path: Path | str = DEFAULT_DB_PATH,
+) -> bool:
+    """Check if a placed/filled signal exists for this event_slug."""
+    conn = _connect(db_path)
+    try:
+        row = conn.execute(
+            """SELECT COUNT(*) FROM signals
+               WHERE event_slug = ?
+                 AND order_status IN ('placed', 'filled')""",
+            (event_slug,),
+        ).fetchone()
+        return row[0] > 0
+    finally:
+        conn.close()

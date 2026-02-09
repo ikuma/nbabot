@@ -10,6 +10,8 @@ class Settings(BaseSettings):
     polymarket_private_key: str = ""
     polymarket_host: str = "https://clob.polymarket.com"
     polymarket_chain_id: int = 137
+    polymarket_signature_type: int = 0  # 0=EOA, 1=POLY_PROXY, 2=GNOSIS_SAFE
+    polymarket_funder: str = ""  # proxy wallet address (POLY_PROXY 時のみ必要)
 
     # Gamma Markets API (for market search/filtering)
     gamma_api_url: str = "https://gamma-api.polymarket.com"
@@ -35,6 +37,10 @@ class Settings(BaseSettings):
     sweet_spot_lo: float = 0.20
     sweet_spot_hi: float = 0.55
 
+    # === Execution ===
+    execution_mode: str = "paper"  # "paper" | "live" | "dry-run"
+    min_balance_usd: float = 50.0
+
     # === Capital management ===
     scan_moneyline: bool = True
     scan_total: bool = False  # Phase 3
@@ -48,6 +54,11 @@ class Settings(BaseSettings):
 
     # === Odds API validation ===
     use_odds_api_validation: bool = False  # bookmaker cross-check
+
+    # === Scheduler ===
+    schedule_window_hours: float = 2.0  # ティップオフ何時間前から発注窓
+    schedule_max_retries: int = 3  # 失敗時のリトライ上限
+    max_orders_per_tick: int = 3  # 1 tick (5分) あたりの最大発注数 (暴走防止)
 
 
 settings = Settings()
