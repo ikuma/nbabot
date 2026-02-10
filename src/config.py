@@ -81,5 +81,17 @@ class Settings(BaseSettings):
     bothside_hedge_delay_min: int = 30  # directional 発注→ hedge 最小遅延 (分)
     bothside_hedge_max_price: float = 0.55  # hedge 価格上限 (sweet spot 上限と同値)
 
+    # === MERGE (Phase B2) ===
+    merge_enabled: bool = False  # BOTHSIDE_ENABLED とは独立
+    merge_max_combined_vwap: float = 0.998  # これ以上なら MERGE しない
+    merge_min_profit_usd: float = 0.10  # MERGE 利益最低額 (gas 負け防止)
+    merge_gas_buffer_gwei: int = 50  # gas price 上限
+    merge_max_retries: int = 3  # MERGE 失敗リトライ上限
+    merge_ctf_address: str = "0x4D97DCd97eC945f40cF65F87097ACe5EA0476045"
+    merge_collateral_address: str = (
+        "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"  # USDC.e on Polygon
+    )
+    merge_polygon_rpc: str = "https://polygon-rpc.com"
+
 
 settings = Settings()

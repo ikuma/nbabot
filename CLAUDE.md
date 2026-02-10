@@ -28,6 +28,7 @@ nbabot/
 ├── src/
 │   ├── config.py                     # Pydantic Settings (.env 読込)
 │   ├── connectors/
+│   │   ├── ctf.py                    # CTF コントラクト (mergePositions — Phase B2)
 │   │   ├── nba_schedule.py           # NBA.com スコアボード (ゲーム発見 + スコア取得)
 │   │   ├── odds_api.py               # The Odds API (レガシー — bookmaker モード用)
 │   │   ├── polymarket.py             # Polymarket Gamma/CLOB API
@@ -36,6 +37,7 @@ nbabot/
 │   │   ├── calibration.py            # 校正テーブル (CalibrationBand, lookup)
 │   │   ├── calibration_scanner.py    # 校正ベーススキャナー (主戦略)
 │   │   ├── dca_strategy.py           # DCA 判定ロジック (時間/価格トリガー)
+│   │   ├── merge_strategy.py         # MERGE 判定純関数 (shares 計算, VWAP, ガード)
 │   │   └── scanner.py               # ブックメーカー乖離スキャナー (レガシー)
 │   ├── notifications/
 │   │   └── telegram.py               # Telegram 通知
@@ -141,7 +143,15 @@ scripts/schedule_trades.py
      │     → max 到達で status → executed
      │     → hedge DCA も同一ロジックで処理 (signal_role='hedge' 付与)
      │
-     ├── 4. auto_settle() — DCA グループ + bothside 一括決済
+     ├── 3c. process_merge_eligible() — MERGE (Phase B2)
+     │   dir+hedge 両方 executed かつ merge_status='none'
+     │     → calculate_mergeable_shares() で min(dir, hedge) ペア計算
+     │     → calculate_combined_vwap() + should_merge() でガードチェック
+     │     → Paper: simulate_merge() → status='simulated'
+     │     → Live: CTF mergePositions() → status='executed' or 'failed'
+     │     → merge_operations + trade_jobs.merge_status を更新
+     │
+     ├── 4. auto_settle() — DCA グループ + bothside + MERGE 一括決済
      │   DCA グループは VWAP ベース PnL (total_shares * $1 - total_cost)
      │   bothside グループは directional PnL + hedge PnL の combined 計算
      │
@@ -241,6 +251,14 @@ Gamma Events API ──→ MoneylineMarket[] ──────────┤
 | `BOTHSIDE_HEDGE_KELLY_MULT` | No | hedge 側 Kelly 乗数 (default: 0.5) |
 | `BOTHSIDE_HEDGE_DELAY_MIN` | No | directional→hedge 最小遅延 (分, default: 30) |
 | `BOTHSIDE_HEDGE_MAX_PRICE` | No | hedge 価格上限 (default: 0.55) |
+| `MERGE_ENABLED` | No | MERGE 有効/無効 (default: false, BOTHSIDE_ENABLED とは独立) |
+| `MERGE_MAX_COMBINED_VWAP` | No | MERGE 判定 combined VWAP 上限 (default: 0.998) |
+| `MERGE_MIN_PROFIT_USD` | No | MERGE 最低利益 (default: 0.10, gas 負け防止) |
+| `MERGE_GAS_BUFFER_GWEI` | No | gas price 上限 gwei (default: 50) |
+| `MERGE_MAX_RETRIES` | No | MERGE 失敗リトライ上限 (default: 3) |
+| `MERGE_CTF_ADDRESS` | No | CTF コントラクトアドレス (default: Polymarket CTF) |
+| `MERGE_COLLATERAL_ADDRESS` | No | USDC コントラクトアドレス (default: USDC.e on Polygon) |
+| `MERGE_POLYGON_RPC` | No | Polygon RPC URL (default: https://polygon-rpc.com) |
 
 ## セキュリティ
 
@@ -278,3 +296,4 @@ Gamma Events API ──→ MoneylineMarket[] ──────────┤
 - 二重発注防止は 5 層: flock → executing ロック → UNIQUE(event_slug, job_side) 制約 → signals 重複チェック → LIMIT 注文。
 - `trade_jobs` テーブルのステートマシン: `pending → executing → executed/skipped/failed/expired` + DCA: `executing → dca_active → executed`。
 - Both-side: directional ジョブ処理後に hedge ジョブを pending で作成。hedge は独立 DCA グループで TWAP 実行。combined VWAP ガードで利鞘なし取引を排除。
+- MERGE (Phase B2): CTF `mergePositions` で YES+NO トークンペアを即座に 1 USDC に変換。Post-DCA 一括 MERGE (gas 1 回)。`MERGE_ENABLED` フラグで制御、EOA のみ対応。Paper mode では Web3 不要でシミュレーション。

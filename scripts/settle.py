@@ -33,7 +33,7 @@ import logging
 
 if TYPE_CHECKING:
     from src.connectors.nba_schedule import NBAGame
-    from src.store.db import SignalRecord
+    from src.store.db import MergeOperation, SignalRecord
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 log = logging.getLogger(__name__)
@@ -119,6 +119,58 @@ def _calc_bothside_pnl(
     return dir_pnl, hedge_pnl, dir_pnl + hedge_pnl
 
 
+def _calc_merge_pnl(
+    merge_op: "MergeOperation",
+    winner_short: str,
+    dir_signals: list["SignalRecord"],
+    hedge_signals: list["SignalRecord"],
+) -> tuple[float, float, float]:
+    """Calculate PnL for a MERGE-settled bothside group.
+
+    Returns (merge_pnl, remainder_pnl, total_pnl).
+    - merge_pnl: net profit from mergePositions (gross - gas)
+    - remainder_pnl: PnL from unmerged shares (normal win/loss)
+    - total_pnl: merge_pnl + remainder_pnl
+    """
+    # MERGE 分: gross = merge_amount * (1 - combined_vwap), net = gross - gas
+    gross = merge_op.merge_amount * (1.0 - merge_op.combined_vwap)
+    gas = merge_op.gas_cost_usd or 0.0
+    merge_pnl = gross - gas
+
+    # 残余分: remainder_shares を remainder_side で判定
+    remainder_pnl = 0.0
+    if merge_op.remainder_shares > 0 and merge_op.remainder_side:
+        if merge_op.remainder_side == "directional":
+            rem_signals = dir_signals
+        else:
+            rem_signals = hedge_signals
+
+        if rem_signals:
+            rem_team = rem_signals[0].team
+            rem_won = rem_team == winner_short
+
+            # 残余シェアのコスト按分計算
+            total_cost = sum(s.kelly_size for s in rem_signals)
+            total_shares = 0.0
+            for s in rem_signals:
+                px = s.fill_price if s.fill_price is not None else s.poly_price
+                if px > 0:
+                    total_shares += s.kelly_size / px
+
+            if total_shares > 0:
+                rem_shares = merge_op.remainder_shares
+                # 残余コスト = total_cost * (rem_shares / total_shares)
+                rem_cost = total_cost * (rem_shares / total_shares)
+
+                if rem_won:
+                    remainder_pnl = rem_shares * 1.0 - rem_cost
+                else:
+                    remainder_pnl = -rem_cost
+
+    total_pnl = merge_pnl + remainder_pnl
+    return merge_pnl, remainder_pnl, total_pnl
+
+
 def _parse_slug(slug: str) -> tuple[str, str, str] | None:
     """Parse event_slug 'nba-{away}-{home}-YYYY-MM-DD' → (away_abbr, home_abbr, date)."""
     m = re.match(r"^nba-([a-z]{3})-([a-z]{3})-(\d{4}-\d{2}-\d{2})$", slug)
@@ -140,6 +192,10 @@ class SettleResult:
     is_bothside: bool = False
     dir_pnl: float = 0.0
     hedge_pnl: float = 0.0
+    # MERGE fields (optional)
+    is_merged: bool = False
+    merge_pnl: float = 0.0
+    remainder_pnl: float = 0.0
 
 
 @dataclass
@@ -173,7 +229,13 @@ class AutoSettleSummary:
         ]
         for r in self.settled:
             status = "WIN" if r.won else "LOSS"
-            if r.is_bothside:
+            if r.is_merged:
+                lines.append(
+                    f"  #{r.signal_id} [MERGE] {r.team}: "
+                    f"MERGE=${r.merge_pnl:+.2f} REM=${r.remainder_pnl:+.2f} "
+                    f"NET=${r.pnl:+.2f} ({r.method})"
+                )
+            elif r.is_bothside:
                 lines.append(
                     f"  #{r.signal_id} [BOTHSIDE] {r.team}: "
                     f"DIR=${r.dir_pnl:+.2f} HEDGE=${r.hedge_pnl:+.2f} "
@@ -498,6 +560,8 @@ def auto_settle(
             )
 
     # Bothside グループ決済
+    from src.store.db import get_merge_operation
+
     for bs_gid, roles in bothside_groups.items():
         dir_signals = roles.get("directional", [])
         hedge_signals = roles.get("hedge", [])
@@ -535,72 +599,121 @@ def auto_settle(
             summary.skipped += len(all_bs_signals)
             continue
 
-        # Combined PnL 計算
-        dir_pnl, hedge_pnl, combined_pnl = _calc_bothside_pnl(
-            winner_short, dir_signals, hedge_signals
-        )
+        # MERGE 済みかどうかで分岐
+        merge_op = get_merge_operation(bs_gid, db_path=path)
+        if merge_op and merge_op.status in ("executed", "simulated"):
+            # MERGE PnL 計算
+            merge_pnl_val, remainder_pnl, total_pnl = _calc_merge_pnl(
+                merge_op, winner_short, dir_signals, hedge_signals
+            )
 
-        # 各シグナルに PnL を記録
-        if not dry_run:
-            # Directional 側
-            if dir_signals:
-                dir_won = dir_signals[0].team == winner_short
-                total_dir_cost = sum(s.kelly_size for s in dir_signals)
-                for sig in dir_signals:
-                    sig_pnl = (
-                        dir_pnl * (sig.kelly_size / total_dir_cost) if total_dir_cost > 0 else 0.0
-                    )
+            # 各シグナルに PnL を記録 (按分)
+            if not dry_run:
+                total_cost = sum(s.kelly_size for s in all_bs_signals)
+                for sig in all_bs_signals:
+                    sig_pnl = total_pnl * (sig.kelly_size / total_cost) if total_cost > 0 else 0.0
+                    sig_won = total_pnl > 0
                     log_result(
                         signal_id=sig.id,
                         outcome=winner_short,
-                        won=dir_won,
+                        won=sig_won,
                         pnl=sig_pnl,
-                        settlement_price=1.0 if dir_won else 0.0,
-                        db_path=path,
-                    )
-            # Hedge 側
-            if hedge_signals:
-                hedge_won = hedge_signals[0].team == winner_short
-                total_hedge_cost = sum(s.kelly_size for s in hedge_signals)
-                for sig in hedge_signals:
-                    sig_pnl = (
-                        hedge_pnl * (sig.kelly_size / total_hedge_cost)
-                        if total_hedge_cost > 0
-                        else 0.0
-                    )
-                    log_result(
-                        signal_id=sig.id,
-                        outcome=winner_short,
-                        won=hedge_won,
-                        pnl=sig_pnl,
-                        settlement_price=1.0 if hedge_won else 0.0,
+                        settlement_price=1.0 if sig_won else 0.0,
                         db_path=path,
                     )
 
-        # どちらか一方でも勝てば combined は WIN 扱い
-        combined_won = combined_pnl > 0
-        result = SettleResult(
-            signal_id=representative.id,
-            team=representative.team,
-            won=combined_won,
-            pnl=combined_pnl,
-            method=method,
-            is_bothside=True,
-            dir_pnl=dir_pnl,
-            hedge_pnl=hedge_pnl,
-        )
-        summary.settled.append(result)
+            result = SettleResult(
+                signal_id=representative.id,
+                team=representative.team,
+                won=total_pnl > 0,
+                pnl=total_pnl,
+                method=method,
+                is_bothside=True,
+                is_merged=True,
+                merge_pnl=merge_pnl_val,
+                remainder_pnl=remainder_pnl,
+            )
+            summary.settled.append(result)
 
-        prefix = "[DRY-RUN] " if dry_run else ""
-        log.info(
-            "%sSettled BOTHSIDE group %s: DIR=$%.2f HEDGE=$%.2f NET=$%.2f via %s",
-            prefix,
-            bs_gid[:8],
-            dir_pnl,
-            hedge_pnl,
-            combined_pnl,
-            method,
-        )
+            prefix = "[DRY-RUN] " if dry_run else ""
+            log.info(
+                "%sSettled MERGE group %s: MERGE=$%.2f REM=$%.2f NET=$%.2f via %s",
+                prefix,
+                bs_gid[:8],
+                merge_pnl_val,
+                remainder_pnl,
+                total_pnl,
+                method,
+            )
+        else:
+            # 既存: 通常 bothside PnL 計算
+            dir_pnl, hedge_pnl, combined_pnl = _calc_bothside_pnl(
+                winner_short, dir_signals, hedge_signals
+            )
+
+            # 各シグナルに PnL を記録
+            if not dry_run:
+                # Directional 側
+                if dir_signals:
+                    dir_won = dir_signals[0].team == winner_short
+                    total_dir_cost = sum(s.kelly_size for s in dir_signals)
+                    for sig in dir_signals:
+                        sig_pnl = (
+                            dir_pnl * (sig.kelly_size / total_dir_cost)
+                            if total_dir_cost > 0
+                            else 0.0
+                        )
+                        log_result(
+                            signal_id=sig.id,
+                            outcome=winner_short,
+                            won=dir_won,
+                            pnl=sig_pnl,
+                            settlement_price=1.0 if dir_won else 0.0,
+                            db_path=path,
+                        )
+                # Hedge 側
+                if hedge_signals:
+                    hedge_won = hedge_signals[0].team == winner_short
+                    total_hedge_cost = sum(s.kelly_size for s in hedge_signals)
+                    for sig in hedge_signals:
+                        sig_pnl = (
+                            hedge_pnl * (sig.kelly_size / total_hedge_cost)
+                            if total_hedge_cost > 0
+                            else 0.0
+                        )
+                        log_result(
+                            signal_id=sig.id,
+                            outcome=winner_short,
+                            won=hedge_won,
+                            pnl=sig_pnl,
+                            settlement_price=1.0 if hedge_won else 0.0,
+                            db_path=path,
+                        )
+
+            # どちらか一方でも勝てば combined は WIN 扱い
+            combined_won = combined_pnl > 0
+            result = SettleResult(
+                signal_id=representative.id,
+                team=representative.team,
+                won=combined_won,
+                pnl=combined_pnl,
+                method=method,
+                is_bothside=True,
+                dir_pnl=dir_pnl,
+                hedge_pnl=hedge_pnl,
+            )
+            summary.settled.append(result)
+
+            prefix = "[DRY-RUN] " if dry_run else ""
+            log.info(
+                "%sSettled BOTHSIDE group %s: DIR=$%.2f HEDGE=$%.2f NET=$%.2f via %s",
+                prefix,
+                bs_gid[:8],
+                dir_pnl,
+                hedge_pnl,
+                combined_pnl,
+                method,
+            )
 
     return summary
 

@@ -40,6 +40,7 @@ def main() -> None:
         format_tick_summary,
         process_dca_active_jobs,
         process_eligible_jobs,
+        process_merge_eligible,
         refresh_schedule,
     )
     from src.store.db import cancel_expired_jobs
@@ -109,6 +110,18 @@ def main() -> None:
             len(dca_failed),
         )
 
+    # 3c. MERGE 処理 (bothside DCA 完了後)
+    merge_results = process_merge_eligible(execution_mode)
+    merge_executed = [r for r in merge_results if r.status == "executed"]
+    merge_failed = [r for r in merge_results if r.status == "failed"]
+
+    if merge_results:
+        log.info(
+            "MERGE results: executed=%d failed=%d",
+            len(merge_executed),
+            len(merge_failed),
+        )
+
     # 4. 決済 (オプション)
     if not args.no_settle:
         try:
@@ -127,6 +140,7 @@ def main() -> None:
             game_date,
             expired,
             dca_results=dca_results,
+            merge_results=merge_results,
         )
         if summary_text:
             from src.notifications.telegram import send_message
@@ -142,11 +156,15 @@ def main() -> None:
     print(f"  Executed: {len(executed)} | Skipped: {len(skipped)} | Failed: {len(failed)}")
     if dca_executed:
         print(f"  DCA entries: {len(dca_executed)}")
+    if merge_executed:
+        print(f"  MERGE: {len(merge_executed)}")
     for r in executed:
         print(f"    OK: {r.event_slug} → signal #{r.signal_id}")
     for r in dca_executed:
         print(f"    DCA: {r.event_slug} → signal #{r.signal_id}")
-    for r in failed + dca_failed:
+    for r in merge_executed:
+        print(f"    MERGE: {r.event_slug}")
+    for r in failed + dca_failed + merge_failed:
         print(f"    FAIL: {r.event_slug} → {r.error}")
     print(f"{'=' * 50}")
 

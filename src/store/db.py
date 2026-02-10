@@ -80,6 +80,8 @@ class SignalRecord:
     # Both-side カラム
     bothside_group_id: str | None = None
     signal_role: str = "directional"
+    # MERGE カラム
+    condition_id: str | None = None
 
 
 @dataclass
@@ -140,6 +142,7 @@ def _connect(db_path: Path | str = DEFAULT_DB_PATH) -> sqlite3.Connection:
     _ensure_liquidity_columns(conn)
     _ensure_dca_columns(conn)
     _ensure_bothside_columns(conn)
+    _ensure_merge_columns(conn)
     return conn
 
 
@@ -311,6 +314,61 @@ def _ensure_bothside_columns(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+# MERGE (Phase B2) 用カラム
+_MERGE_SIGNAL_COLUMNS = [
+    ("condition_id", "TEXT"),
+]
+
+_MERGE_JOB_COLUMNS = [
+    ("merge_status", "TEXT DEFAULT 'none'"),
+    ("merge_operation_id", "INTEGER"),
+]
+
+MERGE_OPERATIONS_SQL = """
+CREATE TABLE IF NOT EXISTS merge_operations (
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    bothside_group_id   TEXT NOT NULL,
+    condition_id        TEXT NOT NULL,
+    event_slug          TEXT NOT NULL,
+    dir_shares          REAL NOT NULL,
+    hedge_shares        REAL NOT NULL,
+    merge_amount        REAL NOT NULL,
+    remainder_shares    REAL NOT NULL,
+    remainder_side      TEXT,
+    dir_vwap            REAL NOT NULL,
+    hedge_vwap          REAL NOT NULL,
+    combined_vwap       REAL NOT NULL,
+    gross_profit_usd    REAL,
+    gas_cost_usd        REAL,
+    net_profit_usd      REAL,
+    status              TEXT NOT NULL DEFAULT 'pending',
+    tx_hash             TEXT,
+    error_message       TEXT,
+    created_at          TEXT NOT NULL,
+    executed_at         TEXT
+);
+"""
+
+
+def _ensure_merge_columns(conn: sqlite3.Connection) -> None:
+    """Add MERGE columns to signals and trade_jobs, and create merge_operations table."""
+    # signals テーブルに condition_id 追加
+    sig_existing = {row[1] for row in conn.execute("PRAGMA table_info(signals)").fetchall()}
+    for col_name, col_def in _MERGE_SIGNAL_COLUMNS:
+        if col_name not in sig_existing:
+            conn.execute(f"ALTER TABLE signals ADD COLUMN {col_name} {col_def}")
+
+    # trade_jobs テーブルに merge カラム追加
+    job_existing = {row[1] for row in conn.execute("PRAGMA table_info(trade_jobs)").fetchall()}
+    for col_name, col_def in _MERGE_JOB_COLUMNS:
+        if col_name not in job_existing:
+            conn.execute(f"ALTER TABLE trade_jobs ADD COLUMN {col_name} {col_def}")
+
+    # merge_operations テーブル作成
+    conn.executescript(MERGE_OPERATIONS_SQL)
+    conn.commit()
+
+
 def log_signal(
     *,
     game_title: str,
@@ -341,6 +399,7 @@ def log_signal(
     dca_sequence: int = 1,
     bothside_group_id: str | None = None,
     signal_role: str = "directional",
+    condition_id: str | None = None,
     db_path: Path | str = DEFAULT_DB_PATH,
 ) -> int:
     """Insert a signal and return its row id."""
@@ -357,9 +416,9 @@ def log_signal(
                 liquidity_score, ask_depth_5c, spread_pct,
                 balance_usd_at_trade, constraint_binding,
                 dca_group_id, dca_sequence,
-                bothside_group_id, signal_role)
+                bothside_group_id, signal_role, condition_id)
                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                       ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                       ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 game_title,
                 event_slug,
@@ -390,6 +449,7 @@ def log_signal(
                 dca_sequence,
                 bothside_group_id,
                 signal_role,
+                condition_id,
             ),
         )
         conn.commit()
@@ -636,6 +696,9 @@ class TradeJob:
     job_side: str = "directional"
     paired_job_id: int | None = None
     bothside_group_id: str | None = None
+    # MERGE フィールド
+    merge_status: str = "none"  # none/pending/executed/failed
+    merge_operation_id: int | None = None
 
 
 @dataclass
@@ -1078,6 +1141,213 @@ def update_dca_job(
         conn.execute(
             f"UPDATE trade_jobs SET {', '.join(parts)} WHERE id = ?",
             tuple(params),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+# ---------------------------------------------------------------------------
+# MERGE helpers (Phase B2)
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class MergeOperation:
+    id: int
+    bothside_group_id: str
+    condition_id: str
+    event_slug: str
+    dir_shares: float
+    hedge_shares: float
+    merge_amount: float
+    remainder_shares: float
+    remainder_side: str | None
+    dir_vwap: float
+    hedge_vwap: float
+    combined_vwap: float
+    gross_profit_usd: float | None
+    gas_cost_usd: float | None
+    net_profit_usd: float | None
+    status: str
+    tx_hash: str | None
+    error_message: str | None
+    created_at: str
+    executed_at: str | None
+
+
+def log_merge_operation(
+    *,
+    bothside_group_id: str,
+    condition_id: str,
+    event_slug: str,
+    dir_shares: float,
+    hedge_shares: float,
+    merge_amount: float,
+    remainder_shares: float,
+    remainder_side: str | None,
+    dir_vwap: float,
+    hedge_vwap: float,
+    combined_vwap: float,
+    gross_profit_usd: float | None = None,
+    gas_cost_usd: float | None = None,
+    net_profit_usd: float | None = None,
+    status: str = "pending",
+    tx_hash: str | None = None,
+    error_message: str | None = None,
+    db_path: Path | str = DEFAULT_DB_PATH,
+) -> int:
+    """Insert a merge operation and return its row id."""
+    now = datetime.now(timezone.utc).isoformat()
+    conn = _connect(db_path)
+    try:
+        cur = conn.execute(
+            """INSERT INTO merge_operations
+               (bothside_group_id, condition_id, event_slug,
+                dir_shares, hedge_shares, merge_amount, remainder_shares,
+                remainder_side, dir_vwap, hedge_vwap, combined_vwap,
+                gross_profit_usd, gas_cost_usd, net_profit_usd,
+                status, tx_hash, error_message, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                bothside_group_id,
+                condition_id,
+                event_slug,
+                dir_shares,
+                hedge_shares,
+                merge_amount,
+                remainder_shares,
+                remainder_side,
+                dir_vwap,
+                hedge_vwap,
+                combined_vwap,
+                gross_profit_usd,
+                gas_cost_usd,
+                net_profit_usd,
+                status,
+                tx_hash,
+                error_message,
+                now,
+            ),
+        )
+        conn.commit()
+        return cur.lastrowid  # type: ignore[return-value]
+    finally:
+        conn.close()
+
+
+def get_merge_operation(
+    bothside_group_id: str,
+    db_path: Path | str = DEFAULT_DB_PATH,
+) -> MergeOperation | None:
+    """Get the merge operation for a bothside group."""
+    conn = _connect(db_path)
+    try:
+        row = conn.execute(
+            "SELECT * FROM merge_operations WHERE bothside_group_id = ?",
+            (bothside_group_id,),
+        ).fetchone()
+        if row:
+            return MergeOperation(**dict(row))
+        return None
+    finally:
+        conn.close()
+
+
+def get_merge_eligible_groups(
+    db_path: Path | str = DEFAULT_DB_PATH,
+) -> list[tuple[str, int, int]]:
+    """Get bothside groups eligible for MERGE.
+
+    Returns list of (bothside_group_id, dir_job_id, hedge_job_id) where:
+    - Both directional and hedge jobs are status='executed'
+    - merge_status='none' (not yet merged)
+    - bothside_group_id is not null
+    """
+    conn = _connect(db_path)
+    try:
+        rows = conn.execute(
+            """SELECT d.bothside_group_id, d.id AS dir_id, h.id AS hedge_id
+               FROM trade_jobs d
+               JOIN trade_jobs h ON d.bothside_group_id = h.bothside_group_id
+               WHERE d.job_side = 'directional'
+                 AND h.job_side = 'hedge'
+                 AND d.status = 'executed'
+                 AND h.status = 'executed'
+                 AND d.bothside_group_id IS NOT NULL
+                 AND COALESCE(d.merge_status, 'none') = 'none'
+               ORDER BY d.id ASC""",
+        ).fetchall()
+        return [(r[0], r[1], r[2]) for r in rows]
+    finally:
+        conn.close()
+
+
+def update_merge_operation(
+    merge_id: int,
+    *,
+    status: str | None = None,
+    tx_hash: str | None = None,
+    error_message: str | None = None,
+    gross_profit_usd: float | None = None,
+    gas_cost_usd: float | None = None,
+    net_profit_usd: float | None = None,
+    db_path: Path | str = DEFAULT_DB_PATH,
+) -> None:
+    """Update a merge operation's fields."""
+    now = datetime.now(timezone.utc).isoformat()
+    conn = _connect(db_path)
+    try:
+        parts: list[str] = []
+        params: list[object] = []
+        if status is not None:
+            parts.append("status = ?")
+            params.append(status)
+            if status in ("executed", "simulated"):
+                parts.append("executed_at = ?")
+                params.append(now)
+        if tx_hash is not None:
+            parts.append("tx_hash = ?")
+            params.append(tx_hash)
+        if error_message is not None:
+            parts.append("error_message = ?")
+            params.append(error_message)
+        if gross_profit_usd is not None:
+            parts.append("gross_profit_usd = ?")
+            params.append(gross_profit_usd)
+        if gas_cost_usd is not None:
+            parts.append("gas_cost_usd = ?")
+            params.append(gas_cost_usd)
+        if net_profit_usd is not None:
+            parts.append("net_profit_usd = ?")
+            params.append(net_profit_usd)
+        if not parts:
+            return
+        params.append(merge_id)
+        conn.execute(
+            f"UPDATE merge_operations SET {', '.join(parts)} WHERE id = ?",
+            tuple(params),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def update_job_merge_status(
+    job_id: int,
+    merge_status: str,
+    merge_operation_id: int | None = None,
+    db_path: Path | str = DEFAULT_DB_PATH,
+) -> None:
+    """Update merge_status and merge_operation_id on a trade job."""
+    now = datetime.now(timezone.utc).isoformat()
+    conn = _connect(db_path)
+    try:
+        conn.execute(
+            """UPDATE trade_jobs
+               SET merge_status = ?, merge_operation_id = ?, updated_at = ?
+               WHERE id = ?""",
+            (merge_status, merge_operation_id, now, job_id),
         )
         conn.commit()
     finally:
