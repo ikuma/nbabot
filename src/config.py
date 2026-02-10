@@ -74,5 +74,12 @@ class Settings(BaseSettings):
     dca_unfavorable_price_pct: float = 10.0  # 10% 以上の上昇で unfavorable (先送り)
     dca_cutoff_before_tipoff_min: int = 30  # ティップオフ N 分前で DCA 打ち切り
 
+    # === Both-Side Betting (Phase B) ===
+    bothside_enabled: bool = False  # 無効時は既存フロー完全保持
+    bothside_max_combined_vwap: float = 0.995  # combined > threshold なら hedge しない
+    bothside_hedge_kelly_mult: float = 0.5  # hedge 側 Kelly 乗数 (directional の半分)
+    bothside_hedge_delay_min: int = 30  # directional 発注→ hedge 最小遅延 (分)
+    bothside_hedge_max_price: float = 0.55  # hedge 価格上限 (sweet spot 上限と同値)
+
 
 settings = Settings()

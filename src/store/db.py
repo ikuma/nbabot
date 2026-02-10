@@ -77,6 +77,9 @@ class SignalRecord:
     # DCA カラム
     dca_group_id: str | None = None
     dca_sequence: int = 1
+    # Both-side カラム
+    bothside_group_id: str | None = None
+    signal_role: str = "directional"
 
 
 @dataclass
@@ -136,6 +139,7 @@ def _connect(db_path: Path | str = DEFAULT_DB_PATH) -> sqlite3.Connection:
     _ensure_execution_columns(conn)
     _ensure_liquidity_columns(conn)
     _ensure_dca_columns(conn)
+    _ensure_bothside_columns(conn)
     return conn
 
 
@@ -225,6 +229,88 @@ def _ensure_dca_columns(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+# Both-side 用カラム (signals)
+_BOTHSIDE_SIGNAL_COLUMNS = [
+    ("bothside_group_id", "TEXT"),
+    ("signal_role", "TEXT DEFAULT 'directional'"),
+]
+
+# Both-side 用カラム (trade_jobs)
+_BOTHSIDE_JOB_COLUMNS = [
+    ("job_side", "TEXT DEFAULT 'directional'"),
+    ("paired_job_id", "INTEGER"),
+    ("bothside_group_id", "TEXT"),
+]
+
+
+def _ensure_bothside_columns(conn: sqlite3.Connection) -> None:
+    """Add both-side columns and migrate UNIQUE constraint on trade_jobs."""
+    # signals テーブルに bothside カラム追加
+    sig_existing = {row[1] for row in conn.execute("PRAGMA table_info(signals)").fetchall()}
+    for col_name, col_def in _BOTHSIDE_SIGNAL_COLUMNS:
+        if col_name not in sig_existing:
+            conn.execute(f"ALTER TABLE signals ADD COLUMN {col_name} {col_def}")
+
+    # trade_jobs テーブルに bothside カラム追加
+    job_existing = {row[1] for row in conn.execute("PRAGMA table_info(trade_jobs)").fetchall()}
+    for col_name, col_def in _BOTHSIDE_JOB_COLUMNS:
+        if col_name not in job_existing:
+            conn.execute(f"ALTER TABLE trade_jobs ADD COLUMN {col_name} {col_def}")
+
+    # UNIQUE 制約マイグレーション: UNIQUE(event_slug) → UNIQUE(event_slug, job_side)
+    # SQLite は ALTER TABLE DROP CONSTRAINT 不可のため、テーブル再作成で対応
+    # index_list で既存 unique 制約をチェック
+    indexes = conn.execute("PRAGMA index_list(trade_jobs)").fetchall()
+    needs_migration = False
+    for idx in indexes:
+        if idx[2]:  # unique index
+            idx_info = conn.execute(f"PRAGMA index_info({idx[1]})").fetchall()
+            col_names = [info[2] for info in idx_info]
+            if col_names == ["event_slug"]:
+                needs_migration = True
+                break
+
+    if needs_migration:
+        # 既存テーブルのカラム情報を取得
+        cols_info = conn.execute("PRAGMA table_info(trade_jobs)").fetchall()
+        col_names = [c[1] for c in cols_info]
+
+        # 新テーブルを作成 (UNIQUE(event_slug, job_side))
+        conn.executescript(f"""
+            CREATE TABLE trade_jobs_new (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                game_date       TEXT NOT NULL,
+                event_slug      TEXT NOT NULL,
+                home_team       TEXT NOT NULL,
+                away_team       TEXT NOT NULL,
+                game_time_utc   TEXT NOT NULL,
+                execute_after   TEXT NOT NULL,
+                execute_before  TEXT NOT NULL,
+                status          TEXT NOT NULL DEFAULT 'pending',
+                signal_id       INTEGER,
+                retry_count     INTEGER DEFAULT 0,
+                error_message   TEXT,
+                created_at      TEXT NOT NULL,
+                updated_at      TEXT NOT NULL,
+                dca_entries_count INTEGER DEFAULT 0,
+                dca_max_entries INTEGER DEFAULT 1,
+                dca_group_id    TEXT,
+                dca_total_budget REAL,
+                dca_slice_size  REAL,
+                job_side        TEXT DEFAULT 'directional',
+                paired_job_id   INTEGER,
+                bothside_group_id TEXT,
+                UNIQUE(event_slug, job_side)
+            );
+            INSERT INTO trade_jobs_new ({", ".join(col_names)})
+                SELECT {", ".join(col_names)} FROM trade_jobs;
+            DROP TABLE trade_jobs;
+            ALTER TABLE trade_jobs_new RENAME TO trade_jobs;
+        """)
+
+    conn.commit()
+
+
 def log_signal(
     *,
     game_title: str,
@@ -253,6 +339,8 @@ def log_signal(
     constraint_binding: str = "kelly",
     dca_group_id: str | None = None,
     dca_sequence: int = 1,
+    bothside_group_id: str | None = None,
+    signal_role: str = "directional",
     db_path: Path | str = DEFAULT_DB_PATH,
 ) -> int:
     """Insert a signal and return its row id."""
@@ -268,9 +356,10 @@ def log_signal(
                 price_band, in_sweet_spot, band_confidence, strategy_mode,
                 liquidity_score, ask_depth_5c, spread_pct,
                 balance_usd_at_trade, constraint_binding,
-                dca_group_id, dca_sequence)
+                dca_group_id, dca_sequence,
+                bothside_group_id, signal_role)
                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                       ?, ?, ?, ?, ?, ?, ?)""",
+                       ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 game_title,
                 event_slug,
@@ -299,6 +388,8 @@ def log_signal(
                 constraint_binding,
                 dca_group_id,
                 dca_sequence,
+                bothside_group_id,
+                signal_role,
             ),
         )
         conn.commit()
@@ -541,6 +632,10 @@ class TradeJob:
     dca_group_id: str | None = None
     dca_total_budget: float | None = None
     dca_slice_size: float | None = None
+    # Both-side フィールド
+    job_side: str = "directional"
+    paired_job_id: int | None = None
+    bothside_group_id: str | None = None
 
 
 @dataclass
@@ -564,18 +659,20 @@ def upsert_trade_job(
     game_time_utc: str,
     execute_after: str,
     execute_before: str,
+    job_side: str = "directional",
     db_path: Path | str = DEFAULT_DB_PATH,
 ) -> bool:
     """Insert a trade job or update game time if changed. Returns True if inserted."""
     now = datetime.now(timezone.utc).isoformat()
     conn = _connect(db_path)
     try:
-        # INSERT OR IGNORE で冪等性確保
+        # INSERT OR IGNORE で冪等性確保 (UNIQUE on event_slug, job_side)
         cur = conn.execute(
             """INSERT OR IGNORE INTO trade_jobs
                (game_date, event_slug, home_team, away_team, game_time_utc,
-                execute_after, execute_before, status, retry_count, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', 0, ?, ?)""",
+                execute_after, execute_before, status, retry_count, job_side,
+                created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', 0, ?, ?, ?)""",
             (
                 game_date,
                 event_slug,
@@ -584,6 +681,7 @@ def upsert_trade_job(
                 game_time_utc,
                 execute_after,
                 execute_before,
+                job_side,
                 now,
                 now,
             ),
@@ -596,10 +694,18 @@ def upsert_trade_job(
                 """UPDATE trade_jobs
                    SET game_time_utc = ?, execute_after = ?, execute_before = ?,
                        updated_at = ?
-                   WHERE event_slug = ?
+                   WHERE event_slug = ? AND job_side = ?
                      AND game_time_utc != ?
                      AND status IN ('pending', 'failed')""",
-                (game_time_utc, execute_after, execute_before, now, event_slug, game_time_utc),
+                (
+                    game_time_utc,
+                    execute_after,
+                    execute_before,
+                    now,
+                    event_slug,
+                    job_side,
+                    game_time_utc,
+                ),
             )
 
         conn.commit()
@@ -746,6 +852,139 @@ def has_signal_for_slug(
             (event_slug,),
         ).fetchone()
         return row[0] > 0
+    finally:
+        conn.close()
+
+
+def has_signal_for_slug_and_side(
+    event_slug: str,
+    signal_role: str = "directional",
+    db_path: Path | str = DEFAULT_DB_PATH,
+) -> bool:
+    """Check if a signal exists for this event_slug and role."""
+    conn = _connect(db_path)
+    try:
+        row = conn.execute(
+            """SELECT COUNT(*) FROM signals
+               WHERE event_slug = ?
+                 AND signal_role = ?
+                 AND order_status IN ('placed', 'filled', 'paper')""",
+            (event_slug, signal_role),
+        ).fetchone()
+        return row[0] > 0
+    finally:
+        conn.close()
+
+
+def upsert_hedge_job(
+    *,
+    directional_job_id: int,
+    event_slug: str,
+    game_date: str,
+    home_team: str,
+    away_team: str,
+    game_time_utc: str,
+    execute_after: str,
+    execute_before: str,
+    bothside_group_id: str,
+    db_path: Path | str = DEFAULT_DB_PATH,
+) -> int | None:
+    """Create a hedge job for a bothside pair. Idempotent via UNIQUE(event_slug, job_side).
+
+    Returns job id if inserted, None if already exists.
+    """
+    now = datetime.now(timezone.utc).isoformat()
+    conn = _connect(db_path)
+    try:
+        cur = conn.execute(
+            """INSERT OR IGNORE INTO trade_jobs
+               (game_date, event_slug, home_team, away_team, game_time_utc,
+                execute_after, execute_before, status, retry_count, job_side,
+                paired_job_id, bothside_group_id, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', 0, 'hedge', ?, ?, ?, ?)""",
+            (
+                game_date,
+                event_slug,
+                home_team,
+                away_team,
+                game_time_utc,
+                execute_after,
+                execute_before,
+                directional_job_id,
+                bothside_group_id,
+                now,
+                now,
+            ),
+        )
+        conn.commit()
+        if cur.rowcount > 0:
+            return cur.lastrowid
+        return None
+    finally:
+        conn.close()
+
+
+def get_hedge_job_for_slug(
+    event_slug: str,
+    db_path: Path | str = DEFAULT_DB_PATH,
+) -> TradeJob | None:
+    """Get the hedge job for an event_slug."""
+    conn = _connect(db_path)
+    try:
+        row = conn.execute(
+            "SELECT * FROM trade_jobs WHERE event_slug = ? AND job_side = 'hedge'",
+            (event_slug,),
+        ).fetchone()
+        if row:
+            return TradeJob(**dict(row))
+        return None
+    finally:
+        conn.close()
+
+
+def get_bothside_signals(
+    bothside_group_id: str,
+    db_path: Path | str = DEFAULT_DB_PATH,
+) -> list[SignalRecord]:
+    """Get all signals in a bothside group (both directional and hedge)."""
+    conn = _connect(db_path)
+    try:
+        rows = conn.execute(
+            """SELECT * FROM signals
+               WHERE bothside_group_id = ?
+               ORDER BY signal_role ASC, dca_sequence ASC""",
+            (bothside_group_id,),
+        ).fetchall()
+        return [SignalRecord(**dict(r)) for r in rows]
+    finally:
+        conn.close()
+
+
+def update_job_bothside(
+    job_id: int,
+    *,
+    bothside_group_id: str | None = None,
+    paired_job_id: int | None = None,
+    db_path: Path | str = DEFAULT_DB_PATH,
+) -> None:
+    """Update bothside-related fields on a trade job."""
+    now = datetime.now(timezone.utc).isoformat()
+    conn = _connect(db_path)
+    try:
+        parts: list[str] = ["updated_at = ?"]
+        params: list[object] = [now]
+        if bothside_group_id is not None:
+            parts.append("bothside_group_id = ?")
+            params.append(bothside_group_id)
+        if paired_job_id is not None:
+            parts.append("paired_job_id = ?")
+            params.append(paired_job_id)
+        params.append(job_id)
+        conn.execute(
+            f"UPDATE trade_jobs SET {', '.join(parts)} WHERE id = ?",
+            tuple(params),
+        )
+        conn.commit()
     finally:
         conn.close()
 

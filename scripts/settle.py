@@ -86,6 +86,39 @@ def _calc_dca_group_pnl(
     return -total_cost
 
 
+def _calc_bothside_pnl(
+    winner_short: str,
+    dir_signals: list["SignalRecord"],
+    hedge_signals: list["SignalRecord"],
+) -> tuple[float, float, float]:
+    """Calculate combined PnL for a bothside game.
+
+    Returns (dir_pnl, hedge_pnl, combined_pnl).
+    """
+    dir_won = dir_signals[0].team == winner_short if dir_signals else False
+    hedge_won = hedge_signals[0].team == winner_short if hedge_signals else False
+
+    if len(dir_signals) > 1:
+        dir_pnl = _calc_dca_group_pnl(dir_won, dir_signals)
+    elif dir_signals:
+        fill_px = dir_signals[0].fill_price
+        dir_pnl = _calc_pnl(dir_won, dir_signals[0].kelly_size, dir_signals[0].poly_price, fill_px)
+    else:
+        dir_pnl = 0.0
+
+    if len(hedge_signals) > 1:
+        hedge_pnl = _calc_dca_group_pnl(hedge_won, hedge_signals)
+    elif hedge_signals:
+        fill_px = hedge_signals[0].fill_price
+        hedge_pnl = _calc_pnl(
+            hedge_won, hedge_signals[0].kelly_size, hedge_signals[0].poly_price, fill_px
+        )
+    else:
+        hedge_pnl = 0.0
+
+    return dir_pnl, hedge_pnl, dir_pnl + hedge_pnl
+
+
 def _parse_slug(slug: str) -> tuple[str, str, str] | None:
     """Parse event_slug 'nba-{away}-{home}-YYYY-MM-DD' → (away_abbr, home_abbr, date)."""
     m = re.match(r"^nba-([a-z]{3})-([a-z]{3})-(\d{4}-\d{2}-\d{2})$", slug)
@@ -103,6 +136,10 @@ class SettleResult:
     won: bool
     pnl: float
     method: str  # "nba_scores" or "polymarket"
+    # Bothside fields (optional)
+    is_bothside: bool = False
+    dir_pnl: float = 0.0
+    hedge_pnl: float = 0.0
 
 
 @dataclass
@@ -136,7 +173,14 @@ class AutoSettleSummary:
         ]
         for r in self.settled:
             status = "WIN" if r.won else "LOSS"
-            lines.append(f"  #{r.signal_id} {r.team}: {status} ${r.pnl:+.2f} ({r.method})")
+            if r.is_bothside:
+                lines.append(
+                    f"  #{r.signal_id} [BOTHSIDE] {r.team}: "
+                    f"DIR=${r.dir_pnl:+.2f} HEDGE=${r.hedge_pnl:+.2f} "
+                    f"NET=${r.pnl:+.2f} ({r.method})"
+                )
+            else:
+                lines.append(f"  #{r.signal_id} {r.team}: {status} ${r.pnl:+.2f} ({r.method})")
         return "\n".join(lines)
 
 
@@ -286,11 +330,30 @@ def auto_settle(
         else:
             standalone.append(sig)
 
+    # Bothside グループをまとめる (同一 bothside_group_id の DCA グループは一括決済)
+    bothside_groups: dict[str, dict[str, list[SignalRecord]]] = defaultdict(
+        lambda: defaultdict(list)
+    )
+    for sig in unsettled:
+        bs_gid = getattr(sig, "bothside_group_id", None)
+        role = getattr(sig, "signal_role", "directional")
+        if bs_gid:
+            bothside_groups[bs_gid][role].append(sig)
+
     # DCA グループ代表 + スタンドアロンを統合してイテレーション
     # DCA グループは代表 (最初のシグナル) で判定し、結果を全メンバーに適用
+    # bothside_group_id がある DCA グループは bothside として処理
     signals_to_process: list[tuple[SignalRecord, list[SignalRecord] | None]] = []
     seen_groups: set[str] = set()
+    seen_bothside: set[str] = set()
     for sig in unsettled:
+        bs_gid = getattr(sig, "bothside_group_id", None)
+        if bs_gid:
+            if bs_gid in seen_bothside:
+                continue
+            seen_bothside.add(bs_gid)
+            # bothside は専用処理するのでここでは skip
+            continue
         gid = getattr(sig, "dca_group_id", None)
         if gid:
             if gid in seen_groups:
@@ -301,10 +364,11 @@ def auto_settle(
             signals_to_process.append((sig, None))
 
     log.info(
-        "Found %d unsettled signal(s) (%d DCA groups, %d standalone)",
+        "Found %d unsettled signal(s) (%d DCA groups, %d standalone, %d bothside groups)",
         len(unsettled),
         len(dca_groups),
         len(standalone),
+        len(bothside_groups),
     )
 
     # NBA.com スコアボードから final ゲームを取得
@@ -432,6 +496,111 @@ def auto_settle(
                 pnl,
                 method,
             )
+
+    # Bothside グループ決済
+    for bs_gid, roles in bothside_groups.items():
+        dir_signals = roles.get("directional", [])
+        hedge_signals = roles.get("hedge", [])
+        all_bs_signals = dir_signals + hedge_signals
+        if not all_bs_signals:
+            continue
+
+        representative = dir_signals[0] if dir_signals else hedge_signals[0]
+        parsed = _parse_slug(representative.event_slug)
+        if not parsed:
+            summary.skipped += len(all_bs_signals)
+            continue
+
+        away_abbr, home_abbr, slug_date = parsed
+        away_full = full_name_from_abbr(away_abbr)
+        home_full = full_name_from_abbr(home_abbr)
+        if not away_full or not home_full:
+            summary.skipped += len(all_bs_signals)
+            continue
+
+        winner_short = None
+        method = ""
+        game = game_index.get((home_full, away_full))
+        if game and slug_date == today_str:
+            winner_full = _determine_winner(game)
+            if winner_full:
+                winner_short = get_team_short_name(winner_full)
+                method = "nba_scores"
+        elif slug_date != today_str:
+            poly_result = _try_polymarket_fallback(representative, away_full, home_full, slug_date)
+            if poly_result:
+                winner_short, method = poly_result
+
+        if not winner_short:
+            summary.skipped += len(all_bs_signals)
+            continue
+
+        # Combined PnL 計算
+        dir_pnl, hedge_pnl, combined_pnl = _calc_bothside_pnl(
+            winner_short, dir_signals, hedge_signals
+        )
+
+        # 各シグナルに PnL を記録
+        if not dry_run:
+            # Directional 側
+            if dir_signals:
+                dir_won = dir_signals[0].team == winner_short
+                total_dir_cost = sum(s.kelly_size for s in dir_signals)
+                for sig in dir_signals:
+                    sig_pnl = (
+                        dir_pnl * (sig.kelly_size / total_dir_cost) if total_dir_cost > 0 else 0.0
+                    )
+                    log_result(
+                        signal_id=sig.id,
+                        outcome=winner_short,
+                        won=dir_won,
+                        pnl=sig_pnl,
+                        settlement_price=1.0 if dir_won else 0.0,
+                        db_path=path,
+                    )
+            # Hedge 側
+            if hedge_signals:
+                hedge_won = hedge_signals[0].team == winner_short
+                total_hedge_cost = sum(s.kelly_size for s in hedge_signals)
+                for sig in hedge_signals:
+                    sig_pnl = (
+                        hedge_pnl * (sig.kelly_size / total_hedge_cost)
+                        if total_hedge_cost > 0
+                        else 0.0
+                    )
+                    log_result(
+                        signal_id=sig.id,
+                        outcome=winner_short,
+                        won=hedge_won,
+                        pnl=sig_pnl,
+                        settlement_price=1.0 if hedge_won else 0.0,
+                        db_path=path,
+                    )
+
+        # どちらか一方でも勝てば combined は WIN 扱い
+        combined_won = combined_pnl > 0
+        result = SettleResult(
+            signal_id=representative.id,
+            team=representative.team,
+            won=combined_won,
+            pnl=combined_pnl,
+            method=method,
+            is_bothside=True,
+            dir_pnl=dir_pnl,
+            hedge_pnl=hedge_pnl,
+        )
+        summary.settled.append(result)
+
+        prefix = "[DRY-RUN] " if dry_run else ""
+        log.info(
+            "%sSettled BOTHSIDE group %s: DIR=$%.2f HEDGE=$%.2f NET=$%.2f via %s",
+            prefix,
+            bs_gid[:8],
+            dir_pnl,
+            hedge_pnl,
+            combined_pnl,
+            method,
+        )
 
     return summary
 

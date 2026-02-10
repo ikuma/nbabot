@@ -208,3 +208,152 @@ def scan_calibration(
 
     opportunities.sort(key=lambda o: o.ev_per_dollar, reverse=True)
     return opportunities
+
+
+# ---------------------------------------------------------------------------
+# Both-side betting (Phase B)
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class BothsideOpportunity:
+    """A both-side betting opportunity for a single game."""
+
+    directional: CalibrationOpportunity  # 高 EV 側
+    hedge: CalibrationOpportunity | None  # 低 EV 側 (条件不通過なら None)
+    combined_price: float  # directional.price + hedge.price (簡易 combined VWAP)
+    hedge_position_usd: float  # hedge サイジング (kelly * hedge_mult)
+
+
+def scan_calibration_bothside(
+    moneylines: list[MoneylineMarket],
+    balance_usd: float | None = None,
+    liquidity_map: dict[str, LiquiditySnapshot] | None = None,
+    max_combined_vwap: float = 0.995,
+    hedge_kelly_mult: float = 0.5,
+    hedge_max_price: float = 0.55,
+) -> list[BothsideOpportunity]:
+    """Calibration scan returning both-side opportunities.
+
+    For each game:
+      1. Evaluate both outcomes (same logic as scan_calibration)
+      2. Collect all positive-EV candidates
+      3. Sort by EV → [0]=directional, [1]=hedge candidate
+      4. Hedge guard: positive EV, price <= max, combined < threshold
+      5. Return BothsideOpportunity with hedge=None if guard fails
+    """
+    results: list[BothsideOpportunity] = []
+
+    for ml in moneylines:
+        if not ml.active:
+            continue
+
+        candidates: list[CalibrationOpportunity] = []
+
+        for i, outcome_name in enumerate(ml.outcomes):
+            if i >= len(ml.prices) or i >= len(ml.token_ids):
+                continue
+
+            price = ml.prices[i]
+            if price <= 0 or price >= 1:
+                continue
+
+            band = lookup_band(price)
+            if band is None:
+                continue
+
+            expected_wr = band.expected_win_rate
+            ev = _ev_per_dollar(expected_wr, price)
+            if ev <= 0:
+                continue
+
+            kelly = _calibration_kelly(expected_wr, price)
+            sweet = is_in_sweet_spot(price, settings.sweet_spot_lo, settings.sweet_spot_hi)
+            if not sweet:
+                kelly *= 0.5
+
+            kelly_usd = min(kelly * settings.max_position_usd * 10, settings.max_position_usd)
+            edge_pct = (expected_wr - price) * 100
+            band_label = f"{band.price_lo:.2f}-{band.price_hi:.2f}"
+
+            # 3層制約
+            liq_score = "unknown"
+            binding = "kelly"
+            rec_exec = "immediate"
+            position_usd = kelly_usd
+            token_id = ml.token_ids[i]
+            liq = liquidity_map.get(token_id) if liquidity_map else None
+
+            if balance_usd is not None or liq is not None:
+                sizing = calculate_position_size(
+                    kelly_usd=kelly_usd,
+                    balance_usd=balance_usd,
+                    liquidity=liq,
+                    max_position_usd=settings.max_position_usd,
+                    capital_risk_pct=settings.capital_risk_pct,
+                    liquidity_fill_pct=settings.liquidity_fill_pct,
+                    max_spread_pct=settings.max_spread_pct,
+                )
+                position_usd = sizing.final_size_usd
+                liq_score = sizing.liquidity_score
+                binding = sizing.constraint_binding
+                rec_exec = sizing.recommended_execution
+                if rec_exec == "skip":
+                    continue
+
+            candidates.append(
+                CalibrationOpportunity(
+                    event_slug=ml.event_slug,
+                    event_title=ml.event_title,
+                    market_type="moneyline",
+                    outcome_name=outcome_name,
+                    token_id=token_id,
+                    poly_price=price,
+                    calibration_edge_pct=edge_pct,
+                    expected_win_rate=expected_wr,
+                    ev_per_dollar=ev,
+                    price_band=band_label,
+                    in_sweet_spot=sweet,
+                    band_confidence=band.confidence,
+                    position_usd=position_usd,
+                    liquidity_score=liq_score,
+                    constraint_binding=binding,
+                    recommended_execution=rec_exec,
+                )
+            )
+
+        if not candidates:
+            continue
+
+        # EV でソート (高い方 = directional)
+        candidates.sort(key=lambda c: c.ev_per_dollar, reverse=True)
+        directional = candidates[0]
+
+        hedge: CalibrationOpportunity | None = None
+        hedge_pos_usd = 0.0
+        combined = directional.poly_price
+
+        if len(candidates) >= 2:
+            hedge_candidate = candidates[1]
+            combined = directional.poly_price + hedge_candidate.poly_price
+
+            # Hedge ガード
+            if (
+                hedge_candidate.ev_per_dollar > 0
+                and hedge_candidate.poly_price <= hedge_max_price
+                and combined < max_combined_vwap
+            ):
+                hedge = hedge_candidate
+                hedge_pos_usd = hedge.position_usd * hedge_kelly_mult
+
+        results.append(
+            BothsideOpportunity(
+                directional=directional,
+                hedge=hedge,
+                combined_price=combined,
+                hedge_position_usd=hedge_pos_usd,
+            )
+        )
+
+    results.sort(key=lambda r: r.directional.ev_per_dollar, reverse=True)
+    return results

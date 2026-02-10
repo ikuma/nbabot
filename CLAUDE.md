@@ -121,20 +121,29 @@ scripts/schedule_trades.py
      │
      ├── 3. process_eligible_jobs() — 初回エントリー
      │   execute_after <= now < execute_before かつ status=pending
-     │     → Gamma API で最新価格取得
-     │     → CLOB API で注文板取得 (流動性チェック有効時)
-     │     → scan_calibration() で EV 判定 (3層制約: Kelly×残高×流動性)
-     │     → 正の EV なら発注 → dca_group_id 生成
-     │     → DCA 有効時: status → dca_active (1/N)
+     │   ├── job_side='directional':
+     │   │     → Gamma API で最新価格取得
+     │   │     → CLOB API で注文板取得 (流動性チェック有効時)
+     │   │     → BOTHSIDE_ENABLED 時: scan_calibration_bothside() で両サイド EV 判定
+     │   │     → それ以外: scan_calibration() で EV 判定 (3層制約: Kelly×残高×流動性)
+     │   │     → 正の EV なら発注 → dca_group_id 生成
+     │   │     → hedge 条件通過なら hedge ジョブを pending で作成
+     │   │     → DCA 有効時: status → dca_active (1/N)
+     │   └── job_side='hedge':
+     │         → paired directional の反対アウトカムを特定
+     │         → combined VWAP 再チェック (directional VWAP + hedge 現在価格)
+     │         → NG → skip / OK → 発注 (独立 DCA グループ)
      │
      ├── 3b. process_dca_active_jobs() — DCA 追加購入
      │   status=dca_active かつ entries < max_entries
      │     → should_add_dca_entry() で時間/価格トリガー判定
      │     → yes なら同一アウトカムを追加購入 (dca_sequence++)
      │     → max 到達で status → executed
+     │     → hedge DCA も同一ロジックで処理 (signal_role='hedge' 付与)
      │
-     ├── 4. auto_settle() — DCA グループ一括決済
+     ├── 4. auto_settle() — DCA グループ + bothside 一括決済
      │   DCA グループは VWAP ベース PnL (total_shares * $1 - total_cost)
+     │   bothside グループは directional PnL + hedge PnL の combined 計算
      │
      └── 5. Telegram サマリー通知
 ```
@@ -227,6 +236,11 @@ Gamma Events API ──→ MoneylineMarket[] ──────────┤
 | `DCA_MIN_PRICE_DIP_PCT` | No | VWAP から N%+ 下落でボーナス購入 (default: 3.0) |
 | `DCA_MAX_PRICE_SPREAD` | No | 初回→最新の最大価格差 (default: 0.15, 超えたら DCA 停止) |
 | `DCA_MIN_INTERVAL_MIN` | No | DCA 最小間隔 (分, default: 30) |
+| `BOTHSIDE_ENABLED` | No | 両サイドベット有効/無効 (default: false) |
+| `BOTHSIDE_MAX_COMBINED_VWAP` | No | combined VWAP 上限 (default: 0.995, 超えたら hedge しない) |
+| `BOTHSIDE_HEDGE_KELLY_MULT` | No | hedge 側 Kelly 乗数 (default: 0.5) |
+| `BOTHSIDE_HEDGE_DELAY_MIN` | No | directional→hedge 最小遅延 (分, default: 30) |
+| `BOTHSIDE_HEDGE_MAX_PRICE` | No | hedge 価格上限 (default: 0.55) |
 
 ## セキュリティ
 
@@ -254,12 +268,13 @@ Gamma Events API ──→ MoneylineMarket[] ──────────┤
 - `data/reports/*.md` は `.gitignore` 対象。
 - Polymarket は地域制限あり。日本からは `HTTP_PROXY` が必要な場合がある。
 - Odds API は **calibration モードでは不要**。NBA.com スコアボードでゲーム発見。bookmaker モードのみ使用。
-- 校正スキャナーは BUY シグナルのみ。1 試合で両アウトカムの EV を比較し、高い方を 1 つ選択。
+- 校正スキャナーは BUY シグナルのみ。`BOTHSIDE_ENABLED=false` 時は 1 試合 1 シグナル (高 EV 側)。`true` 時は両サイド購入可能。
 - Kelly criterion の分数 (default 0.25) でポジションサイジング。フル Kelly は使わない。
 - スイートスポット (0.20-0.55) 内はフル Kelly、外は 0.5x Kelly。
 - `scanner.py` (bookmaker 乖離) はレガシーモードとして温存。削除しない。
 - Auto-settle は NBA.com スコア (本日分) + Polymarket Gamma API (過去分) の二段構え。
 - `scan.py` / `cron_scan.sh` は手動バックアップ用に温存。主エントリは `schedule_trades.py`。
 - スケジューラーは cron (5分間隔) + SQLite ジョブキュー。デーモンではない。
-- 二重発注防止は 5 層: flock → executing ロック → UNIQUE 制約 → signals 重複チェック → LIMIT 注文。
+- 二重発注防止は 5 層: flock → executing ロック → UNIQUE(event_slug, job_side) 制約 → signals 重複チェック → LIMIT 注文。
 - `trade_jobs` テーブルのステートマシン: `pending → executing → executed/skipped/failed/expired` + DCA: `executing → dca_active → executed`。
+- Both-side: directional ジョブ処理後に hedge ジョブを pending で作成。hedge は独立 DCA グループで TWAP 実行。combined VWAP ガードで利鞘なし取引を排除。
