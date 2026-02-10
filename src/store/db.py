@@ -74,6 +74,9 @@ class SignalRecord:
     spread_pct: float | None = None
     balance_usd_at_trade: float | None = None
     constraint_binding: str = "kelly"
+    # DCA カラム
+    dca_group_id: str | None = None
+    dca_sequence: int = 1
 
 
 @dataclass
@@ -132,6 +135,7 @@ def _connect(db_path: Path | str = DEFAULT_DB_PATH) -> sqlite3.Connection:
     _ensure_calibration_columns(conn)
     _ensure_execution_columns(conn)
     _ensure_liquidity_columns(conn)
+    _ensure_dca_columns(conn)
     return conn
 
 
@@ -192,6 +196,35 @@ def _ensure_liquidity_columns(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+# DCA 用カラム (signals + trade_jobs)
+_DCA_SIGNAL_COLUMNS = [
+    ("dca_group_id", "TEXT"),
+    ("dca_sequence", "INTEGER DEFAULT 1"),
+]
+
+_DCA_JOB_COLUMNS = [
+    ("dca_entries_count", "INTEGER DEFAULT 0"),
+    ("dca_max_entries", "INTEGER DEFAULT 1"),
+    ("dca_group_id", "TEXT"),
+    ("dca_total_budget", "REAL"),
+    ("dca_slice_size", "REAL"),
+]
+
+
+def _ensure_dca_columns(conn: sqlite3.Connection) -> None:
+    """Add DCA columns to signals and trade_jobs tables if they don't exist."""
+    sig_existing = {row[1] for row in conn.execute("PRAGMA table_info(signals)").fetchall()}
+    for col_name, col_def in _DCA_SIGNAL_COLUMNS:
+        if col_name not in sig_existing:
+            conn.execute(f"ALTER TABLE signals ADD COLUMN {col_name} {col_def}")
+
+    job_existing = {row[1] for row in conn.execute("PRAGMA table_info(trade_jobs)").fetchall()}
+    for col_name, col_def in _DCA_JOB_COLUMNS:
+        if col_name not in job_existing:
+            conn.execute(f"ALTER TABLE trade_jobs ADD COLUMN {col_name} {col_def}")
+    conn.commit()
+
+
 def log_signal(
     *,
     game_title: str,
@@ -218,6 +251,8 @@ def log_signal(
     spread_pct: float | None = None,
     balance_usd_at_trade: float | None = None,
     constraint_binding: str = "kelly",
+    dca_group_id: str | None = None,
+    dca_sequence: int = 1,
     db_path: Path | str = DEFAULT_DB_PATH,
 ) -> int:
     """Insert a signal and return its row id."""
@@ -232,9 +267,10 @@ def log_signal(
                 market_type, calibration_edge_pct, expected_win_rate,
                 price_band, in_sweet_spot, band_confidence, strategy_mode,
                 liquidity_score, ask_depth_5c, spread_pct,
-                balance_usd_at_trade, constraint_binding)
+                balance_usd_at_trade, constraint_binding,
+                dca_group_id, dca_sequence)
                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                       ?, ?, ?, ?, ?)""",
+                       ?, ?, ?, ?, ?, ?, ?)""",
             (
                 game_title,
                 event_slug,
@@ -261,6 +297,8 @@ def log_signal(
                 spread_pct,
                 balance_usd_at_trade,
                 constraint_binding,
+                dca_group_id,
+                dca_sequence,
             ),
         )
         conn.commit()
@@ -497,6 +535,12 @@ class TradeJob:
     error_message: str | None
     created_at: str
     updated_at: str
+    # DCA フィールド (既存 DB では None / デフォルト値)
+    dca_entries_count: int = 0
+    dca_max_entries: int = 1
+    dca_group_id: str | None = None
+    dca_total_budget: float | None = None
+    dca_slice_size: float | None = None
 
 
 @dataclass
@@ -508,6 +552,7 @@ class JobSummary:
     failed: int = 0
     expired: int = 0
     cancelled: int = 0
+    dca_active: int = 0
 
 
 def upsert_trade_job(
@@ -635,10 +680,11 @@ def cancel_expired_jobs(
     now_utc: str,
     db_path: Path | str = DEFAULT_DB_PATH,
 ) -> int:
-    """Mark pending/failed jobs past their execution window as expired."""
+    """Mark pending/failed/dca_active jobs past their execution window as expired/executed."""
     now = datetime.now(timezone.utc).isoformat()
     conn = _connect(db_path)
     try:
+        # pending/failed → expired
         cur = conn.execute(
             """UPDATE trade_jobs
                SET status = 'expired', updated_at = ?
@@ -646,8 +692,18 @@ def cancel_expired_jobs(
                  AND execute_before <= ?""",
             (now, now_utc),
         )
+        count = cur.rowcount
+        # dca_active → executed (DCA 完了扱い: ゲーム開始で DCA ウィンドウ終了)
+        cur2 = conn.execute(
+            """UPDATE trade_jobs
+               SET status = 'executed', updated_at = ?
+               WHERE status = 'dca_active'
+                 AND execute_before <= ?""",
+            (now, now_utc),
+        )
+        count += cur2.rowcount
         conn.commit()
-        return cur.rowcount
+        return count
     finally:
         conn.close()
 
@@ -680,15 +736,110 @@ def has_signal_for_slug(
     event_slug: str,
     db_path: Path | str = DEFAULT_DB_PATH,
 ) -> bool:
-    """Check if a placed/filled signal exists for this event_slug."""
+    """Check if a signal exists for this event_slug (any execution mode)."""
     conn = _connect(db_path)
     try:
         row = conn.execute(
             """SELECT COUNT(*) FROM signals
                WHERE event_slug = ?
-                 AND order_status IN ('placed', 'filled')""",
+                 AND order_status IN ('placed', 'filled', 'paper')""",
             (event_slug,),
         ).fetchone()
         return row[0] > 0
+    finally:
+        conn.close()
+
+
+# ---------------------------------------------------------------------------
+# DCA helpers
+# ---------------------------------------------------------------------------
+
+
+def get_dca_active_jobs(
+    now_utc: str,
+    db_path: Path | str = DEFAULT_DB_PATH,
+) -> list[TradeJob]:
+    """Get jobs with status='dca_active' that haven't reached max DCA entries.
+
+    Only returns jobs whose game hasn't started yet (execute_before > now).
+    """
+    conn = _connect(db_path)
+    try:
+        rows = conn.execute(
+            """SELECT * FROM trade_jobs
+               WHERE status = 'dca_active'
+                 AND execute_before > ?
+                 AND dca_entries_count < dca_max_entries
+               ORDER BY game_time_utc ASC""",
+            (now_utc,),
+        ).fetchall()
+        return [TradeJob(**dict(r)) for r in rows]
+    finally:
+        conn.close()
+
+
+def get_dca_group_signals(
+    dca_group_id: str,
+    db_path: Path | str = DEFAULT_DB_PATH,
+) -> list[SignalRecord]:
+    """Get all signals in a DCA group, ordered by sequence."""
+    conn = _connect(db_path)
+    try:
+        rows = conn.execute(
+            """SELECT * FROM signals
+               WHERE dca_group_id = ?
+               ORDER BY dca_sequence ASC""",
+            (dca_group_id,),
+        ).fetchall()
+        return [SignalRecord(**dict(r)) for r in rows]
+    finally:
+        conn.close()
+
+
+def update_dca_job(
+    job_id: int,
+    *,
+    dca_entries_count: int | None = None,
+    dca_max_entries: int | None = None,
+    dca_group_id: str | None = None,
+    dca_total_budget: float | None = None,
+    dca_slice_size: float | None = None,
+    status: str | None = None,
+    signal_id: int | None = None,
+    db_path: Path | str = DEFAULT_DB_PATH,
+) -> None:
+    """Update DCA-related fields on a trade job."""
+    now = datetime.now(timezone.utc).isoformat()
+    conn = _connect(db_path)
+    try:
+        parts: list[str] = ["updated_at = ?"]
+        params: list[object] = [now]
+        if dca_entries_count is not None:
+            parts.append("dca_entries_count = ?")
+            params.append(dca_entries_count)
+        if dca_max_entries is not None:
+            parts.append("dca_max_entries = ?")
+            params.append(dca_max_entries)
+        if dca_group_id is not None:
+            parts.append("dca_group_id = ?")
+            params.append(dca_group_id)
+        if dca_total_budget is not None:
+            parts.append("dca_total_budget = ?")
+            params.append(dca_total_budget)
+        if dca_slice_size is not None:
+            parts.append("dca_slice_size = ?")
+            params.append(dca_slice_size)
+        if status is not None:
+            parts.append("status = ?")
+            params.append(status)
+        if signal_id is not None:
+            parts.append("signal_id = ?")
+            params.append(signal_id)
+        params.append(job_id)
+        conn.execute(
+            f"UPDATE trade_jobs SET {', '.join(parts)} WHERE id = ?",
+            tuple(params),
+        )
+        conn.commit()
     finally:
         conn.close()

@@ -62,9 +62,17 @@ class Settings(BaseSettings):
     check_liquidity: bool = True  # 流動性チェック有効/無効
 
     # === Scheduler ===
-    schedule_window_hours: float = 2.0  # ティップオフ何時間前から発注窓
+    schedule_window_hours: float = 8.0  # ティップオフ何時間前から発注窓 (DCA 用に拡張)
     schedule_max_retries: int = 3  # 失敗時のリトライ上限
-    max_orders_per_tick: int = 3  # 1 tick (5分) あたりの最大発注数 (暴走防止)
+    max_orders_per_tick: int = 3  # 1 tick (2分) あたりの最大発注数 (暴走防止)
+
+    # === DCA (Dollar Cost Averaging) ===
+    dca_max_entries: int = 5  # 1 アウトカムあたりの最大購入回数 (sovereign 中央値 6-7)
+    dca_max_price_spread: float = 0.15  # 初回→最新の最大価格差。超えたら DCA 停止
+    dca_min_interval_min: int = 2  # DCA 最小間隔 (分) — TWAP では 1 tick = 2min
+    dca_favorable_price_pct: float = 0.0  # 初回価格以下なら favorable (前倒し購入)
+    dca_unfavorable_price_pct: float = 10.0  # 10% 以上の上昇で unfavorable (先送り)
+    dca_cutoff_before_tipoff_min: int = 30  # ティップオフ N 分前で DCA 打ち切り
 
 
 settings = Settings()
