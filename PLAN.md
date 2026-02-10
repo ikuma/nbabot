@@ -145,6 +145,19 @@ sovereign2013 の MERGE データ:
 - `merge_operations` テーブル + `trade_jobs.merge_status` 追跡
 - MERGE PnL 決済: merge_pnl (即時利益) + remainder_pnl (残余の勝敗) の分離計算
 
+### Phase R: コードベースリファクタリング — **完了**
+
+500行ガイドラインを超過していた3ファイルを段階的に分割。ロジック変更なし (移動のみ)。
+
+- **R1**: `scripts/settle.py` (851行) → `src/settlement/pnl_calc.py` + `src/settlement/settler.py` + CLI (~120行)
+  - module→script 逆転依存 (`schedule_trades.py` → `scripts/settle.py`) を解消
+- **R2**: `src/store/db.py` (1354行) → `src/store/models.py` + `src/store/schema.py` + クエリ (~500行)
+  - `JobStatus(StrEnum)` 新設、re-export で後方互換維持
+- **R3**: `src/scheduler/trade_scheduler.py` (1386行) → `job_executor.py` + `hedge_executor.py` + `dca_executor.py` + `merge_executor.py` + ディスパッチャ (~300行)
+- **R4**: VWAP 計算統合 — `dca_strategy.calculate_vwap_from_pairs()` に一元化
+  - `merge_strategy.calculate_combined_vwap()` とインライン VWAP を置換
+- **R5**: `src/analysis/pnl.py` (736行) → `src/analysis/report_generator.py` + 計算 (~355行)
+
 ---
 
 ## 今後のフェーズ (未着手)

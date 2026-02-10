@@ -7,7 +7,7 @@ from unittest.mock import patch
 
 import pytest
 
-from src.scheduler.trade_scheduler import (
+from src.scheduler.hedge_executor import (
     _schedule_hedge_job,
 )
 from src.store.db import (
@@ -90,7 +90,7 @@ class TestScheduleHedgeJob:
             hedge_position_usd=6.0,
         )
 
-        with patch("src.scheduler.trade_scheduler.settings") as mock_settings:
+        with patch("src.scheduler.hedge_executor.settings") as mock_settings:
             mock_settings.bothside_hedge_delay_min = 30
 
             _schedule_hedge_job(dir_job, bothside, "dca-grp-1", str(db_path))
@@ -104,7 +104,7 @@ class TestScheduleHedgeJob:
 
     def test_no_hedge_when_disabled(self, db_path, monkeypatch):
         """When bothside_enabled=False, no hedge job should be created."""
-        monkeypatch.setattr("src.scheduler.trade_scheduler.settings.bothside_enabled", False)
+        monkeypatch.setattr("src.scheduler.hedge_executor.settings.bothside_enabled", False)
 
         # just verify no crash when bothside is disabled
         hedge = get_hedge_job_for_slug("nba-nyk-bos-2026-02-10", db_path=db_path)
@@ -129,7 +129,7 @@ class TestScheduleHedgeJob:
             hedge_position_usd=6.0,
         )
 
-        with patch("src.scheduler.trade_scheduler.settings") as mock_settings:
+        with patch("src.scheduler.hedge_executor.settings") as mock_settings:
             mock_settings.bothside_hedge_delay_min = 60  # 60 min delay
 
             _schedule_hedge_job(dir_job, bothside, "dca-grp-1", str(db_path))
@@ -166,7 +166,7 @@ class TestHedgeIndependentDca:
             hedge_position_usd=6.0,
         )
 
-        with patch("src.scheduler.trade_scheduler.settings") as mock_settings:
+        with patch("src.scheduler.hedge_executor.settings") as mock_settings:
             mock_settings.bothside_hedge_delay_min = 30
 
             _schedule_hedge_job(dir_job, bothside, "dca-grp-dir", str(db_path))

@@ -8,6 +8,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from src.strategy.dca_strategy import calculate_vwap_from_pairs
+
 if TYPE_CHECKING:
     from src.config import Settings
     from src.store.db import SignalRecord
@@ -49,6 +51,11 @@ def calculate_mergeable_shares(
     return dir_shares, hedge_shares, merge_amount, remainder, remainder_side
 
 
+def _signal_prices(signals: list[SignalRecord]) -> list[float]:
+    """Extract effective price (fill_price or poly_price) from signals."""
+    return [s.fill_price if s.fill_price is not None else s.poly_price for s in signals]
+
+
 def calculate_combined_vwap(
     dir_signals: list[SignalRecord],
     hedge_signals: list[SignalRecord],
@@ -58,24 +65,15 @@ def calculate_combined_vwap(
     Returns:
         (dir_vwap, hedge_vwap, combined_vwap)
     """
-    dir_cost = sum(s.kelly_size for s in dir_signals)
-    dir_shares = 0.0
-    for s in dir_signals:
-        price = s.fill_price if s.fill_price is not None else s.poly_price
-        if price > 0:
-            dir_shares += s.kelly_size / price
-    dir_vwap = dir_cost / dir_shares if dir_shares > 0 else 0.0
-
-    hedge_cost = sum(s.kelly_size for s in hedge_signals)
-    hedge_shares = 0.0
-    for s in hedge_signals:
-        price = s.fill_price if s.fill_price is not None else s.poly_price
-        if price > 0:
-            hedge_shares += s.kelly_size / price
-    hedge_vwap = hedge_cost / hedge_shares if hedge_shares > 0 else 0.0
-
-    combined_vwap = dir_vwap + hedge_vwap
-    return dir_vwap, hedge_vwap, combined_vwap
+    dir_vwap = calculate_vwap_from_pairs(
+        [s.kelly_size for s in dir_signals],
+        _signal_prices(dir_signals),
+    )
+    hedge_vwap = calculate_vwap_from_pairs(
+        [s.kelly_size for s in hedge_signals],
+        _signal_prices(hedge_signals),
+    )
+    return dir_vwap, hedge_vwap, dir_vwap + hedge_vwap
 
 
 def should_merge(

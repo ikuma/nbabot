@@ -125,7 +125,7 @@ def main() -> None:
     # 4. 決済 (オプション)
     if not args.no_settle:
         try:
-            from scripts.settle import auto_settle
+            from src.settlement.settler import auto_settle
 
             settle_summary = auto_settle()
             if settle_summary.settled:

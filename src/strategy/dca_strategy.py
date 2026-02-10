@@ -42,6 +42,18 @@ class DCADecision:
     sequence: int  # 次のシーケンス番号
 
 
+def calculate_vwap_from_pairs(costs: list[float], prices: list[float]) -> float:
+    """Calculate VWAP from parallel cost and price lists.
+
+    VWAP = total_cost / total_shares, where shares_i = cost_i / price_i.
+    """
+    if not costs or not prices:
+        return 0.0
+    total_cost = sum(costs)
+    total_shares = sum(c / p for c, p in zip(costs, prices) if p > 0)
+    return total_cost / total_shares if total_shares > 0 else 0.0
+
+
 def calculate_vwap(entries: list[DCAEntry]) -> float:
     """Calculate volume-weighted average price from DCA entries.
 
@@ -50,11 +62,10 @@ def calculate_vwap(entries: list[DCAEntry]) -> float:
     """
     if not entries:
         return 0.0
-    total_cost = sum(e.size_usd for e in entries)
-    total_shares = sum(e.size_usd / e.price for e in entries if e.price > 0)
-    if total_shares <= 0:
-        return 0.0
-    return total_cost / total_shares
+    return calculate_vwap_from_pairs(
+        [e.size_usd for e in entries],
+        [e.price for e in entries],
+    )
 
 
 def _calc_twap_schedule(

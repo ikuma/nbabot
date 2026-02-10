@@ -193,7 +193,7 @@ class TestAutoSettle:
         assert summary.skipped == 0
         mock_games.assert_not_called()
 
-    @patch("scripts.settle._try_polymarket_fallback")
+    @patch("src.settlement.settler._try_polymarket_fallback")
     @patch("src.connectors.nba_schedule.fetch_todays_games")
     @patch("src.store.db.get_unsettled")
     @patch("src.store.db.log_result")

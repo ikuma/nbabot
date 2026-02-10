@@ -35,6 +35,7 @@ Polymarket NBA キャリブレーション Bot。Polymarket の構造的ミス�
 | 3b | DCA / TWAP 適応実行 (max 5 回, 2 分間隔) | **完了** |
 | B | Both-Side Betting (directional + hedge) | **完了** |
 | B2 | MERGE (CTF mergePositions — YES+NO→USDC) | **完了** |
+| R | コードベースリファクタリング (500行分割) | **完了** |
 | B3 | POLY_PROXY / Safe Multisig MERGE 対応 | 未着手 |
 | C | Total (O/U) マーケット校正 | 未着手 |
 | D | リスク管理 (サーキットブレーカー, DD 管理) | 未着手 |
@@ -55,26 +56,36 @@ nbabot/
 │   ├── strategy/
 │   │   ├── calibration.py            # 校正テーブル (CalibrationBand, lookup)
 │   │   ├── calibration_scanner.py    # 校正ベーススキャナー (主戦略)
-│   │   ├── dca_strategy.py           # DCA 判定ロジック (時間/価格トリガー)
+│   │   ├── dca_strategy.py           # DCA 判定ロジック (時間/価格トリガー, VWAP 共通関数)
 │   │   ├── merge_strategy.py         # MERGE 判定純関数 (shares 計算, VWAP, ガード)
 │   │   └── scanner.py               # ブックメーカー乖離スキャナー (レガシー)
 │   ├── notifications/
 │   │   └── telegram.py               # Telegram 通知
 │   ├── scheduler/
-│   │   └── trade_scheduler.py        # 試合別タイミング発注 (cron 駆動ステートマシン)
+│   │   ├── trade_scheduler.py        # ディスパッチャ (refresh, recover, process, summary)
+│   │   ├── job_executor.py           # 初回発注処理 (directional)
+│   │   ├── hedge_executor.py         # Hedge ジョブ処理 (bothside)
+│   │   ├── dca_executor.py           # DCA 追加購入処理
+│   │   └── merge_executor.py         # MERGE 処理 (CTF mergePositions)
+│   ├── settlement/
+│   │   ├── pnl_calc.py              # 決済 P&L 計算 (DCA, bothside, merge)
+│   │   └── settler.py               # 決済コアロジック (auto_settle, settle_signal)
 │   ├── sizing/
 │   │   ├── liquidity.py              # 注文板流動性抽出 (LiquiditySnapshot, extract, score)
 │   │   └── position_sizer.py         # 3層制約サイジング (Kelly×残高×流動性)
 │   ├── analysis/
 │   │   ├── pnl.py                    # 純関数 P&L 計算 (condition/game 単位)
+│   │   ├── report_generator.py       # P&L レポート生成 (generate_report)
 │   │   └── strategy_profile.py       # 軽量戦略フィンガープリント (Sharpe, DD 等)
 │   ├── execution/                    # 注文実行 (未実装 — Phase 4)
 │   ├── risk/                         # リスク管理 (未実装 — Phase 4)
 │   └── store/
-│       └── db.py                     # SQLite (シグナル・結果・trade_jobs ログ)
+│       ├── db.py                     # SQLite クエリ関数 (re-export 付き)
+│       ├── models.py                 # データモデル (SignalRecord, TradeJob, JobStatus 等)
+│       └── schema.py                 # DDL + マイグレーション (_connect, _ensure_*)
 ├── scripts/
 │   ├── scan.py                       # 日次エッジスキャン (手動バックアップ用)
-│   ├── settle.py                     # 決済 (--auto: 自動 / interactive: 手動)
+│   ├── settle.py                     # 決済 CLI (コアは src/settlement/)
 │   ├── schedule_trades.py            # 試合別スケジューラー CLI (主エントリ)
 │   ├── cron_schedule.sh              # スケジューラー cron ラッパー (5分間隔)
 │   ├── cron_scan.sh                  # 旧 cron ラッパー (無効化済み・手動用)
