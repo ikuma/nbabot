@@ -38,6 +38,7 @@ def main() -> None:
     from src.config import settings
     from src.scheduler.trade_scheduler import (
         format_tick_summary,
+        process_dca_active_jobs,
         process_eligible_jobs,
         refresh_schedule,
     )
@@ -82,7 +83,7 @@ def main() -> None:
     if expired:
         log.info("Expired %d job(s)", expired)
 
-    # 3. 窓内ジョブ実行
+    # 3. 窓内ジョブ実行 (初回エントリー)
     results = process_eligible_jobs(execution_mode)
 
     executed = [r for r in results if r.status == "executed"]
@@ -95,6 +96,18 @@ def main() -> None:
         len(skipped),
         len(failed),
     )
+
+    # 3b. DCA アクティブジョブ処理
+    dca_results = process_dca_active_jobs(execution_mode)
+    dca_executed = [r for r in dca_results if r.status == "executed"]
+    dca_failed = [r for r in dca_results if r.status == "failed"]
+
+    if dca_results:
+        log.info(
+            "DCA results: executed=%d failed=%d",
+            len(dca_executed),
+            len(dca_failed),
+        )
 
     # 4. 決済 (オプション)
     if not args.no_settle:
@@ -109,7 +122,12 @@ def main() -> None:
 
     # 5. Telegram 通知
     try:
-        summary_text = format_tick_summary(results, game_date, expired)
+        summary_text = format_tick_summary(
+            results,
+            game_date,
+            expired,
+            dca_results=dca_results,
+        )
         if summary_text:
             from src.notifications.telegram import send_message
 
@@ -122,9 +140,13 @@ def main() -> None:
     print(f"  Scheduler tick: {game_date} [{execution_mode}]")
     print(f"  New jobs: {new_jobs} | Expired: {expired}")
     print(f"  Executed: {len(executed)} | Skipped: {len(skipped)} | Failed: {len(failed)}")
+    if dca_executed:
+        print(f"  DCA entries: {len(dca_executed)}")
     for r in executed:
         print(f"    OK: {r.event_slug} → signal #{r.signal_id}")
-    for r in failed:
+    for r in dca_executed:
+        print(f"    DCA: {r.event_slug} → signal #{r.signal_id}")
+    for r in failed + dca_failed:
         print(f"    FAIL: {r.event_slug} → {r.error}")
     print(f"{'=' * 50}")
 

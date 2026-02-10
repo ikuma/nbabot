@@ -1,5 +1,5 @@
 #!/bin/bash
-# Per-game trade scheduler — called by crontab every 15 minutes
+# Per-game trade scheduler — called by crontab every 2 minutes (DCA 対応)
 # Logs to data/logs/scheduler-YYYY-MM-DD.log
 
 set -euo pipefail

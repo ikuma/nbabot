@@ -39,16 +39,51 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name
 log = logging.getLogger(__name__)
 
 
-def _calc_pnl(won: bool, kelly_size: float, poly_price: float) -> float:
-    """Calculate PnL for a paper trade.
+def _calc_pnl(
+    won: bool,
+    kelly_size: float,
+    poly_price: float,
+    fill_price: float | None = None,
+) -> float:
+    """Calculate PnL for a single trade.
 
-    BUY at poly_price, risk kelly_size USD.
-    Win: profit = kelly_size * (1/poly_price - 1)  (shares pay $1 each)
+    BUY at price, risk kelly_size USD.
+    Win: profit = kelly_size * (1/price - 1)  (shares pay $1 each)
     Lose: loss = -kelly_size
+
+    Uses fill_price if available (live trade), otherwise poly_price (paper).
     """
+    price = fill_price if fill_price is not None else poly_price
+    if price <= 0:
+        return -kelly_size
     if won:
-        return kelly_size * (1.0 / poly_price - 1.0)
+        return kelly_size * (1.0 / price - 1.0)
     return -kelly_size
+
+
+def _calc_dca_group_pnl(
+    won: bool,
+    signals: list["SignalRecord"],
+) -> float:
+    """Calculate PnL for a DCA group (multiple entries on same outcome).
+
+    total_cost = sum(kelly_size)
+    total_shares = sum(kelly_size / price)
+    win: pnl = total_shares * $1.00 - total_cost
+    lose: pnl = -total_cost
+    """
+    total_cost = 0.0
+    total_shares = 0.0
+    for sig in signals:
+        price = sig.fill_price if sig.fill_price is not None else sig.poly_price
+        if price <= 0:
+            total_cost += sig.kelly_size
+            continue
+        total_cost += sig.kelly_size
+        total_shares += sig.kelly_size / price
+    if won:
+        return total_shares * 1.0 - total_cost
+    return -total_cost
 
 
 def _parse_slug(slug: str) -> tuple[str, str, str] | None:
@@ -117,7 +152,8 @@ def settle_signal(signal_id: int, winner: str, db_path: Path | str | None = None
         return
 
     won = signal.team == winner
-    pnl = _calc_pnl(won, signal.kelly_size, signal.poly_price)
+    fill_px = getattr(signal, "fill_price", None)
+    pnl = _calc_pnl(won, signal.kelly_size, signal.poly_price, fill_px)
 
     log_result(
         signal_id=signal.id,
@@ -131,8 +167,80 @@ def settle_signal(signal_id: int, winner: str, db_path: Path | str | None = None
     status = "WIN" if won else "LOSS"
     log.info(
         "Settled signal #%d: %s %s → %s (PnL: $%.2f)",
-        signal.id, signal.side, signal.team, status, pnl,
+        signal.id,
+        signal.side,
+        signal.team,
+        status,
+        pnl,
     )
+
+
+def _refresh_order_statuses(db_path: Path | str | None = None) -> None:
+    """Check placed orders for fills; cancel orders older than 24h."""
+    from datetime import datetime, timedelta, timezone
+
+    from src.store.db import DEFAULT_DB_PATH, get_placed_orders, update_order_status
+
+    path = db_path or DEFAULT_DB_PATH
+    placed = get_placed_orders(db_path=path)
+    if not placed:
+        return
+
+    log.info("Checking %d placed order(s) for fill status", len(placed))
+
+    from src.connectors.polymarket import cancel_order, get_order_status
+
+    now = datetime.now(timezone.utc)
+    stale_cutoff = now - timedelta(hours=24)
+
+    for signal in placed:
+        if not signal.order_id:
+            continue
+
+        try:
+            status = get_order_status(signal.order_id)
+        except Exception:
+            log.exception("Failed to get status for order %s", signal.order_id)
+            continue
+
+        order_status = status.get("status", "").lower()
+
+        if order_status in ("matched", "filled"):
+            # 約定済み — fill_price を記録
+            avg_price = None
+            try:
+                avg_price = float(status.get("associate_trades", [{}])[0].get("price", 0))
+            except (IndexError, KeyError, TypeError, ValueError):
+                pass
+            if not avg_price:
+                try:
+                    avg_price = float(status.get("price", 0))
+                except (ValueError, TypeError):
+                    avg_price = signal.poly_price
+            update_order_status(signal.id, signal.order_id, "filled", avg_price, db_path=path)
+            log.info(
+                "Order %s filled @ %.3f (signal #%d)",
+                signal.order_id,
+                avg_price or 0,
+                signal.id,
+            )
+        elif order_status in ("cancelled", "expired"):
+            update_order_status(signal.id, signal.order_id, "cancelled", db_path=path)
+            log.info("Order %s already %s (signal #%d)", signal.order_id, order_status, signal.id)
+        else:
+            # まだオープン — 24h 超ならキャンセル
+            try:
+                created = datetime.fromisoformat(signal.created_at.replace("Z", "+00:00"))
+            except (ValueError, AttributeError):
+                continue
+            if created < stale_cutoff:
+                log.info(
+                    "Cancelling stale order %s (signal #%d, age > 24h)",
+                    signal.order_id,
+                    signal.id,
+                )
+                if cancel_order(signal.order_id):
+                    update_order_status(signal.id, signal.order_id, "cancelled", db_path=path)
 
 
 def auto_settle(
@@ -145,6 +253,7 @@ def auto_settle(
     Args:
         today: Override today's date (YYYY-MM-DD) for testing. Defaults to actual today.
     """
+    from collections import defaultdict
     from datetime import date
 
     from src.connectors.nba_schedule import fetch_todays_games
@@ -152,6 +261,14 @@ def auto_settle(
     from src.store.db import DEFAULT_DB_PATH, get_unsettled, log_result
 
     path = db_path or DEFAULT_DB_PATH
+
+    # ライブ注文のステータスを更新 (約定チェック + 24h 超キャンセル)
+    if not dry_run:
+        try:
+            _refresh_order_statuses(db_path=path)
+        except Exception:
+            log.exception("Failed to refresh order statuses (continuing with settle)")
+
     unsettled = get_unsettled(db_path=path)
     summary = AutoSettleSummary()
 
@@ -159,7 +276,36 @@ def auto_settle(
         log.info("No unsettled signals")
         return summary
 
-    log.info("Found %d unsettled signal(s)", len(unsettled))
+    # DCA グループをまとめる (同一 dca_group_id のシグナルは一括決済)
+    dca_groups: dict[str, list[SignalRecord]] = defaultdict(list)
+    standalone: list[SignalRecord] = []
+    for sig in unsettled:
+        gid = getattr(sig, "dca_group_id", None)
+        if gid:
+            dca_groups[gid].append(sig)
+        else:
+            standalone.append(sig)
+
+    # DCA グループ代表 + スタンドアロンを統合してイテレーション
+    # DCA グループは代表 (最初のシグナル) で判定し、結果を全メンバーに適用
+    signals_to_process: list[tuple[SignalRecord, list[SignalRecord] | None]] = []
+    seen_groups: set[str] = set()
+    for sig in unsettled:
+        gid = getattr(sig, "dca_group_id", None)
+        if gid:
+            if gid in seen_groups:
+                continue
+            seen_groups.add(gid)
+            signals_to_process.append((sig, dca_groups[gid]))
+        else:
+            signals_to_process.append((sig, None))
+
+    log.info(
+        "Found %d unsettled signal(s) (%d DCA groups, %d standalone)",
+        len(unsettled),
+        len(dca_groups),
+        len(standalone),
+    )
 
     # NBA.com スコアボードから final ゲームを取得
     all_games = fetch_todays_games()
@@ -173,7 +319,7 @@ def auto_settle(
 
     today_str = today or date.today().strftime("%Y-%m-%d")
 
-    for signal in unsettled:
+    for signal, dca_group in signals_to_process:
         parsed = _parse_slug(signal.event_slug)
         if not parsed:
             log.warning("Cannot parse slug '%s' for signal #%d", signal.event_slug, signal.id)
@@ -186,12 +332,16 @@ def auto_settle(
         if not away_full or not home_full:
             log.warning(
                 "Unknown team abbr in slug '%s' for signal #%d",
-                signal.event_slug, signal.id,
+                signal.event_slug,
+                signal.id,
             )
             summary.skipped += 1
             continue
 
-        # NBA.com スコアで決済 (slug 日付が今日の場合)
+        # 勝者判定 (NBA.com or Polymarket)
+        winner_short: str | None = None
+        method: str = ""
+
         game = game_index.get((home_full, away_full))
         if game and slug_date == today_str:
             winner_full = _determine_winner(game)
@@ -199,16 +349,61 @@ def auto_settle(
                 log.warning("Tie or zero scores for signal #%d, skipping", signal.id)
                 summary.skipped += 1
                 continue
-
             winner_short = get_team_short_name(winner_full)
-            if not winner_short:
-                log.warning("Cannot get short name for '%s'", winner_full)
-                summary.skipped += 1
-                continue
+            method = "nba_scores"
+        elif slug_date != today_str:
+            poly_result = _try_polymarket_fallback(signal, away_full, home_full, slug_date)
+            if poly_result:
+                winner_short, method = poly_result
 
-            won = signal.team == winner_short
-            pnl = _calc_pnl(won, signal.kelly_size, signal.poly_price)
+        if not winner_short:
+            log.debug("Signal #%d: game not yet final or not found, skipping", signal.id)
+            summary.skipped += 1
+            continue
 
+        won = signal.team == winner_short
+
+        # PnL 計算: DCA グループ or 単一シグナル
+        if dca_group and len(dca_group) > 1:
+            # DCA グループ: VWAP ベース PnL
+            group_pnl = _calc_dca_group_pnl(won, dca_group)
+            # 各シグナルに按分 (total_cost 比率)
+            total_cost = sum(s.kelly_size for s in dca_group)
+            for sig in dca_group:
+                sig_pnl = group_pnl * (sig.kelly_size / total_cost) if total_cost > 0 else 0.0
+                if not dry_run:
+                    log_result(
+                        signal_id=sig.id,
+                        outcome=winner_short,
+                        won=won,
+                        pnl=sig_pnl,
+                        settlement_price=1.0 if won else 0.0,
+                        db_path=path,
+                    )
+            result = SettleResult(
+                signal_id=signal.id,
+                team=signal.team,
+                won=won,
+                pnl=group_pnl,
+                method=method,
+            )
+            summary.settled.append(result)
+            status = "WIN" if won else "LOSS"
+            prefix = "[DRY-RUN] " if dry_run else ""
+            log.info(
+                "%sSettled DCA group (%d entries) #%d: %s → %s (PnL: $%.2f) via %s",
+                prefix,
+                len(dca_group),
+                signal.id,
+                signal.team,
+                status,
+                group_pnl,
+                method,
+            )
+        else:
+            # 単一シグナル: 既存ロジック
+            fill_px = getattr(signal, "fill_price", None)
+            pnl = _calc_pnl(won, signal.kelly_size, signal.poly_price, fill_px)
             if not dry_run:
                 log_result(
                     signal_id=signal.id,
@@ -218,53 +413,25 @@ def auto_settle(
                     settlement_price=1.0 if won else 0.0,
                     db_path=path,
                 )
-
             result = SettleResult(
-                signal_id=signal.id, team=signal.team,
-                won=won, pnl=pnl, method="nba_scores",
+                signal_id=signal.id,
+                team=signal.team,
+                won=won,
+                pnl=pnl,
+                method=method,
             )
             summary.settled.append(result)
             status = "WIN" if won else "LOSS"
             prefix = "[DRY-RUN] " if dry_run else ""
             log.info(
-                "%sSettled #%d: %s → %s (PnL: $%.2f) via NBA scores",
-                prefix, signal.id, signal.team, status, pnl,
+                "%sSettled #%d: %s → %s (PnL: $%.2f) via %s",
+                prefix,
+                signal.id,
+                signal.team,
+                status,
+                pnl,
+                method,
             )
-            continue
-
-        # Polymarket フォールバック: slug 日付≠今日 → Gamma Events API で確認
-        if slug_date != today_str:
-            poly_result = _try_polymarket_fallback(signal, away_full, home_full, slug_date)
-            if poly_result:
-                winner_short, method = poly_result
-                won = signal.team == winner_short
-                pnl = _calc_pnl(won, signal.kelly_size, signal.poly_price)
-
-                if not dry_run:
-                    log_result(
-                        signal_id=signal.id,
-                        outcome=winner_short,
-                        won=won,
-                        pnl=pnl,
-                        settlement_price=1.0 if won else 0.0,
-                        db_path=path,
-                    )
-
-                result = SettleResult(
-                    signal_id=signal.id, team=signal.team,
-                    won=won, pnl=pnl, method=method,
-                )
-                summary.settled.append(result)
-                status = "WIN" if won else "LOSS"
-                prefix = "[DRY-RUN] " if dry_run else ""
-                log.info(
-                    "%sSettled #%d: %s → %s (PnL: $%.2f) via %s",
-                    prefix, signal.id, signal.team, status, pnl, method,
-                )
-                continue
-
-        log.debug("Signal #%d: game not yet final or not found, skipping", signal.id)
-        summary.skipped += 1
 
     return summary
 
@@ -323,13 +490,17 @@ def list_unsettled(db_path: Path | str | None = None) -> None:
         return
 
     print(f"\nUnsettled signals: {len(unsettled)}\n")
-    print(f"{'ID':>4}  {'Date':10}  {'Game':40}  {'Team':25}  {'Edge%':>6}  {'Size$':>6}")
-    print("-" * 100)
+    print(
+        f"{'ID':>4}  {'Date':10}  {'Game':40}  {'Team':25}"
+        f"  {'Edge%':>6}  {'Size$':>6}  {'Status':10}"
+    )
+    print("-" * 112)
     for s in unsettled:
-        date = s.created_at[:10]
+        dt = s.created_at[:10]
+        status = getattr(s, "order_status", "paper") or "paper"
         print(
-            f"{s.id:>4}  {date:10}  {s.game_title:40}  {s.team:25}  "
-            f"{s.edge_pct:>5.1f}%  ${s.kelly_size:>5.0f}"
+            f"{s.id:>4}  {dt:10}  {s.game_title:40}  {s.team:25}  "
+            f"{s.edge_pct:>5.1f}%  ${s.kelly_size:>5.0f}  {status:10}"
         )
 
 
@@ -365,7 +536,9 @@ def main() -> None:
     parser.add_argument("--list", action="store_true", help="List unsettled signals")
     parser.add_argument("--auto", action="store_true", help="Auto-settle via NBA.com scores")
     parser.add_argument(
-        "--dry-run", action="store_true", help="Dry run (no DB writes)",
+        "--dry-run",
+        action="store_true",
+        help="Dry run (no DB writes)",
     )
     parser.add_argument("--signal-id", type=int, help="Settle a specific signal by ID")
     parser.add_argument("--winner", type=str, help="Winner team name (with --signal-id)")
@@ -380,6 +553,7 @@ def main() -> None:
         if summary.settled and not args.dry_run:
             try:
                 from src.notifications.telegram import send_message
+
                 send_message(summary.format_summary())
             except Exception:
                 log.exception("Failed to send Telegram notification")

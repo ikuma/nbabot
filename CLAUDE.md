@@ -35,6 +35,7 @@ nbabot/
 │   ├── strategy/
 │   │   ├── calibration.py            # 校正テーブル (CalibrationBand, lookup)
 │   │   ├── calibration_scanner.py    # 校正ベーススキャナー (主戦略)
+│   │   ├── dca_strategy.py           # DCA 判定ロジック (時間/価格トリガー)
 │   │   └── scanner.py               # ブックメーカー乖離スキャナー (レガシー)
 │   ├── notifications/
 │   │   └── telegram.py               # Telegram 通知
@@ -105,7 +106,7 @@ nbabot/
 ### Per-game スケジューラー (主戦略)
 
 ```
-cron (5分ごと)
+cron (2分ごと)
      │
      ▼
 scripts/schedule_trades.py
@@ -115,17 +116,25 @@ scripts/schedule_trades.py
      │   (試合時刻変更も UPDATE)
      │
      ├── 2. cancel_expired_jobs()
-     │   execute_before < now → expired
+     │   execute_before < now → expired (pending/failed)
+     │   execute_before < now → executed (dca_active — DCA 完了扱い)
      │
-     ├── 3. process_eligible_jobs()
+     ├── 3. process_eligible_jobs() — 初回エントリー
      │   execute_after <= now < execute_before かつ status=pending
      │     → Gamma API で最新価格取得
      │     → CLOB API で注文板取得 (流動性チェック有効時)
      │     → scan_calibration() で EV 判定 (3層制約: Kelly×残高×流動性)
-     │     → 正の EV なら発注 (mode に応じて paper/live)
-     │     → signal_id を trade_jobs に紐付け (流動性メタデータ含む)
+     │     → 正の EV なら発注 → dca_group_id 生成
+     │     → DCA 有効時: status → dca_active (1/N)
      │
-     ├── 4. auto_settle()
+     ├── 3b. process_dca_active_jobs() — DCA 追加購入
+     │   status=dca_active かつ entries < max_entries
+     │     → should_add_dca_entry() で時間/価格トリガー判定
+     │     → yes なら同一アウトカムを追加購入 (dca_sequence++)
+     │     → max 到達で status → executed
+     │
+     ├── 4. auto_settle() — DCA グループ一括決済
+     │   DCA グループは VWAP ベース PnL (total_shares * $1 - total_cost)
      │
      └── 5. Telegram サマリー通知
 ```
@@ -211,9 +220,13 @@ Gamma Events API ──→ MoneylineMarket[] ──────────┤
 | `LIQUIDITY_FILL_PCT` | No | ask depth 5c の最大 N% (default: 10.0) |
 | `MAX_SPREAD_PCT` | No | スプレッド上限 % (default: 10.0, 超えたら skip) |
 | `CHECK_LIQUIDITY` | No | 流動性チェック有効/無効 (default: true) |
-| `SCHEDULE_WINDOW_HOURS` | No | ティップオフ何時間前から発注窓 (default: 2.0) |
+| `SCHEDULE_WINDOW_HOURS` | No | ティップオフ何時間前から発注窓 (default: 8.0, DCA 用に拡張) |
 | `SCHEDULE_MAX_RETRIES` | No | 失敗時のリトライ上限 (default: 3) |
 | `MAX_ORDERS_PER_TICK` | No | 1 tick あたりの最大発注数 (default: 3) |
+| `DCA_MAX_ENTRIES` | No | 1 アウトカムあたり最大 DCA 回数 (default: 5) |
+| `DCA_MIN_PRICE_DIP_PCT` | No | VWAP から N%+ 下落でボーナス購入 (default: 3.0) |
+| `DCA_MAX_PRICE_SPREAD` | No | 初回→最新の最大価格差 (default: 0.15, 超えたら DCA 停止) |
+| `DCA_MIN_INTERVAL_MIN` | No | DCA 最小間隔 (分, default: 30) |
 
 ## セキュリティ
 
@@ -249,4 +262,4 @@ Gamma Events API ──→ MoneylineMarket[] ──────────┤
 - `scan.py` / `cron_scan.sh` は手動バックアップ用に温存。主エントリは `schedule_trades.py`。
 - スケジューラーは cron (5分間隔) + SQLite ジョブキュー。デーモンではない。
 - 二重発注防止は 5 層: flock → executing ロック → UNIQUE 制約 → signals 重複チェック → LIMIT 注文。
-- `trade_jobs` テーブルのステートマシン: `pending → executing → executed/skipped/failed/expired`。
+- `trade_jobs` テーブルのステートマシン: `pending → executing → executed/skipped/failed/expired` + DCA: `executing → dca_active → executed`。

@@ -36,6 +36,27 @@ def send_message(text: str, parse_mode: str = "Markdown") -> bool:
         return False
 
 
+def format_order_notification(
+    team: str,
+    price: float,
+    size: float,
+    order_id: str,
+    event_title: str = "",
+    edge_pct: float = 0.0,
+) -> str:
+    """Format a live order notification for Telegram."""
+    lines = [
+        "*Order Placed*",
+        f"BUY {team} @ {price:.3f} | ${size:.0f}",
+    ]
+    if event_title:
+        lines.append(f"Game: {event_title}")
+    if edge_pct:
+        lines.append(f"Edge: {edge_pct:.1f}%")
+    lines.append(f"Order: `{order_id}`")
+    return "\n".join(lines)
+
+
 def format_opportunities(opportunities: list) -> str:
     """Format opportunities list into a Telegram message.
 
