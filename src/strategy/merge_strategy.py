@@ -82,8 +82,12 @@ def should_merge(
     s: Settings,
     gas_cost_usd: float = 0.0,
     is_eoa: bool = True,
+    is_supported_wallet: bool | None = None,
 ) -> tuple[bool, str]:
     """Determine whether to merge.
+
+    Args:
+        is_supported_wallet: Explicit wallet support flag. Falls back to is_eoa if None.
 
     Returns:
         (should_merge, reason)
@@ -91,8 +95,9 @@ def should_merge(
     if not s.merge_enabled:
         return False, "merge_disabled"
 
-    if not is_eoa:
-        return False, "not_eoa"
+    wallet_ok = is_supported_wallet if is_supported_wallet is not None else is_eoa
+    if not wallet_ok:
+        return False, "unsupported_wallet"
 
     if combined_vwap >= s.merge_max_combined_vwap:
         return False, f"combined_vwap={combined_vwap:.4f}>={s.merge_max_combined_vwap}"

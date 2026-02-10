@@ -160,12 +160,23 @@ sovereign2013 の MERGE データ:
 
 ---
 
-## 今後のフェーズ (未着手)
+### Phase B3: POLY_PROXY (Gnosis Safe) MERGE 対応 — **完了**
+Phase B2 MERGE は EOA のみだったが、POLY_PROXY (1-of-1 Gnosis Safe) ウォレットでの MERGE に対応。
 
-### Phase B3: POLY_PROXY / Safe Multisig 対応
-- Phase B2 MERGE は EOA のみ。POLY_PROXY (Gnosis Safe) ウォレットでの MERGE 対応
-- `execTransaction()` 経由の間接呼び出し
-- 優先度: POLY_PROXY で運用する場合にのみ必要
+実装内容:
+- Safe `execTransaction()` 経由で CTF `mergePositions` を間接呼び出し (`src/connectors/safe_tx.py`)
+- `validate_safe_config()`: 1-of-1 検証 (VERSION, threshold, owner チェック)
+- Safe の YES/NO トークン残高事前チェック
+- `safeTxGas=0`: 内部失敗時に全体 revert + nonce 保全
+- EIP-712 直接署名 (`unsafe_sign_hash`, v+=4 不要)
+- `merge_positions_via_safe()`: Safe 経由の MERGE 実行パス
+- `merge_executor.py`: POLY_PROXY 判定 + Safe/EOA ディスパッチ
+- `should_merge()` に `is_supported_wallet` パラメータ追加 (後方互換)
+- スコープ: 1-of-1 Safe のみ。マルチシグ・Magic Link は未対応
+
+---
+
+## 今後のフェーズ (未着手)
 
 ### Phase C: Total (Over/Under) マーケット対応
 - Moneyline に加え、Total (Over/Under) マーケットの校正テーブル構築
@@ -261,7 +272,7 @@ sovereign2013 の MERGE データ:
 - **ゲーム発見**: NBA.com Scoreboard API (Odds API は bookmaker モードのみ)
 - **DB**: SQLite (`data/paper_trades.db`)
 - **通知**: Telegram Bot API
-- **CI**: pytest (305 tests) + ruff
+- **CI**: pytest (401 tests) + ruff
 
 ---
 

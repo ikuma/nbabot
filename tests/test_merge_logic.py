@@ -173,7 +173,29 @@ class TestShouldMerge:
         s = self._settings()
         ok, reason = should_merge(0.85, 100.0, s, is_eoa=False)
         assert ok is False
-        assert reason == "not_eoa"
+        assert reason == "unsupported_wallet"
+
+    def test_poly_proxy_supported(self):
+        """is_supported_wallet=True → POLY_PROXY でも MERGE OK。"""
+        s = self._settings()
+        ok, reason = should_merge(
+            0.85, 100.0, s, gas_cost_usd=0.01,
+            is_eoa=False, is_supported_wallet=True,
+        )
+        assert ok is True
+        assert reason == "ok"
+
+    def test_backward_compat(self):
+        """is_supported_wallet 未指定 → is_eoa にフォールバック。"""
+        s = self._settings()
+        # is_eoa=True, is_supported_wallet=None → wallet_ok=True
+        ok, _ = should_merge(0.85, 100.0, s, gas_cost_usd=0.01, is_eoa=True)
+        assert ok is True
+
+        # is_eoa=False, is_supported_wallet=None → wallet_ok=False
+        ok, reason = should_merge(0.85, 100.0, s, is_eoa=False)
+        assert ok is False
+        assert reason == "unsupported_wallet"
 
     def test_high_combined_vwap(self):
         s = self._settings()

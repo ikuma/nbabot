@@ -37,7 +37,7 @@ Polymarket NBA キャリブレーション Bot。Polymarket の構造的ミス�
 | B2 | MERGE (CTF mergePositions — YES+NO→USDC) | **完了** |
 | R | コードベースリファクタリング (500行分割) | **完了** |
 | D | リスク管理 + インフラ強化 (CB, ドリフト, WAL, ログ) | **完了** |
-| B3 | POLY_PROXY / Safe Multisig MERGE 対応 | 未着手 |
+| B3 | POLY_PROXY (Gnosis Safe) MERGE 対応 | **完了** |
 | C | Total (O/U) マーケット校正 | 未着手 |
 | E | スケール + 本番運用 ($30-50K) | 未着手 |
 
@@ -48,7 +48,8 @@ nbabot/
 ├── src/
 │   ├── config.py                     # Pydantic Settings (.env 読込)
 │   ├── connectors/
-│   │   ├── ctf.py                    # CTF コントラクト (mergePositions — Phase B2)
+│   │   ├── ctf.py                    # CTF コントラクト (mergePositions — Phase B2/B3)
+│   │   ├── safe_tx.py                # Gnosis Safe execTransaction ヘルパー (Phase B3)
 │   │   ├── nba_schedule.py           # NBA.com スコアボード (ゲーム発見 + スコア取得)
 │   │   ├── odds_api.py               # The Odds API (レガシー — bookmaker モード用)
 │   │   ├── polymarket.py             # Polymarket Gamma/CLOB API
@@ -306,6 +307,7 @@ Gamma Events API ──→ MoneylineMarket[] ──────────┤
 | `MERGE_CTF_ADDRESS` | No | CTF コントラクトアドレス (default: Polymarket CTF) |
 | `MERGE_COLLATERAL_ADDRESS` | No | USDC コントラクトアドレス (default: USDC.e on Polygon) |
 | `MERGE_POLYGON_RPC` | No | Polygon RPC URL (default: https://polygon-rpc.com) |
+| `MERGE_SAFE_OUTER_GAS_LIMIT` | No | Safe execTransaction の外側 gas limit (default: 400000) |
 | `DAILY_LOSS_LIMIT_PCT` | No | 日次損失限度 % → ORANGE トリガー (default: 3.0) |
 | `WEEKLY_LOSS_LIMIT_PCT` | No | 週次損失限度 % → RED トリガー (default: 5.0) |
 | `MAX_DRAWDOWN_LIMIT_PCT` | No | 最大ドローダウン % → RED トリガー (default: 15.0) |
@@ -350,7 +352,7 @@ Gamma Events API ──→ MoneylineMarket[] ──────────┤
 - 二重発注防止は 5 層: flock → executing ロック → UNIQUE(event_slug, job_side) 制約 → signals 重複チェック → LIMIT 注文。
 - `trade_jobs` テーブルのステートマシン: `pending → executing → executed/skipped/failed/expired` + DCA: `executing → dca_active → executed`。
 - Both-side: directional ジョブ処理後に hedge ジョブを pending で作成。hedge は独立 DCA グループで TWAP 実行。combined VWAP ガードで利鞘なし取引を排除。
-- MERGE (Phase B2): CTF `mergePositions` で YES+NO トークンペアを即座に 1 USDC に変換。Post-DCA 一括 MERGE (gas 1 回)。`MERGE_ENABLED` フラグで制御、EOA のみ対応。Paper mode では Web3 不要でシミュレーション。
+- MERGE (Phase B2/B3): CTF `mergePositions` で YES+NO トークンペアを即座に 1 USDC に変換。Post-DCA 一括 MERGE (gas 1 回)。`MERGE_ENABLED` フラグで制御。EOA (sig_type=0) は直接呼び出し、POLY_PROXY (sig_type=1, 1-of-1 Gnosis Safe) は `safe_tx.exec_safe_transaction()` 経由。マルチシグ Safe (threshold>1) と Magic Link は未対応。Paper mode では Web3 不要でシミュレーション。
 - リスク管理 (Phase D): 3 段階サーキットブレーカー (GREEN→YELLOW→ORANGE→RED)。毎 tick で PnL・連敗・ドローダウン・校正ドリフトを算出。RED は手動解除のみ (72h ロック)、ORANGE は 24h 後に自動降格条件あり。段階的復帰メカニズムで即座のフルサイズ復帰を防止。
 - Risk engine 障害時は degraded mode (sizing_multiplier=0.5) で保守的に続行。`RISK_CHECK_ENABLED=false` で無効化可能。
 - 校正ドリフト検出: バンド別の rolling 勝率をテーブル期待勝率と z-score 比較。2σ 超の乖離で ORANGE トリガー。

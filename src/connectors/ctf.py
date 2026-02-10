@@ -109,6 +109,28 @@ def _get_ctf_contract(w3):
     )
 
 
+def _compute_position_token_id(condition_id_bytes: bytes, index_set: int) -> int:
+    """Compute ERC-1155 position token ID from condition and index set."""
+    from web3 import Web3
+
+    collection_id = Web3.solidity_keccak(
+        ["bytes32", "bytes32", "uint256"],
+        [PARENT_COLLECTION_ID, condition_id_bytes, index_set],
+    )
+    return int.from_bytes(collection_id, "big")
+
+
+def _get_token_owner_address(w3) -> str:
+    """Resolve the address that holds CTF tokens.
+
+    POLY_PROXY (sig_type=1): tokens are held by the Safe (funder address).
+    EOA (sig_type=0): tokens are held by the EOA itself.
+    """
+    if settings.polymarket_signature_type == 1 and settings.polymarket_funder:
+        return w3.to_checksum_address(settings.polymarket_funder)
+    return _get_account(w3).address
+
+
 def get_matic_balance() -> float:
     """Get MATIC balance for the configured wallet."""
     w3 = _get_web3()
@@ -125,28 +147,22 @@ def get_ctf_balance(condition_id: str, index_set: int) -> float:
         index_set: 1 for YES, 2 for NO.
     """
     w3 = _get_web3()
-    account = _get_account(w3)
     ctf = _get_ctf_contract(w3)
 
-    # Compute position ID = keccak256(collectionId, conditionId, indexSet)
-    # For simplicity, we use the CTF balanceOf with the ERC-1155 token ID
-    # Token ID is computed from the condition and partition
     cond_bytes = bytes.fromhex(condition_id.replace("0x", ""))
-    from web3 import Web3
+    token_id = _compute_position_token_id(cond_bytes, index_set)
 
-    # Position token ID calculation
-    collection_id = Web3.solidity_keccak(
-        ["bytes32", "bytes32", "uint256"],
-        [PARENT_COLLECTION_ID, cond_bytes, index_set],
-    )
-    token_id = int.from_bytes(collection_id, "big")
-
-    balance = ctf.functions.balanceOf(account.address, token_id).call()
+    owner_address = _get_token_owner_address(w3)
+    balance = ctf.functions.balanceOf(owner_address, token_id).call()
     return _wei_to_shares(balance)
 
 
 def estimate_merge_gas(condition_id: str, amount: float) -> float:
     """Estimate gas cost for a merge operation in MATIC."""
+    # Safe 経由の場合、gas estimation は不正確になるためフォールバック値を使用
+    if settings.polymarket_signature_type == 1:
+        return 0.02  # Safe execTransaction は ~2x gas
+
     w3 = _get_web3()
     account = _get_account(w3)
     ctf = _get_ctf_contract(w3)
@@ -262,6 +278,161 @@ def merge_positions(condition_id: str, amount: float) -> MergeResult:
 
     except Exception as e:
         logger.exception("mergePositions failed for condition %s", condition_id)
+        return MergeResult(
+            condition_id=condition_id,
+            amount_shares=0,
+            amount_usdc=0,
+            gas_cost_matic=0,
+            gas_cost_usd=0,
+            tx_hash="",
+            success=False,
+            error=str(e),
+        )
+
+
+def merge_positions_via_safe(condition_id: str, amount: float) -> MergeResult:
+    """Execute mergePositions via Gnosis Safe (1-of-1 POLY_PROXY).
+
+    Args:
+        condition_id: Hex string of the condition ID.
+        amount: Number of shares to merge (float, 6 decimal precision).
+    """
+    from src.connectors.safe_tx import (
+        check_token_balances,
+        exec_safe_transaction,
+        validate_safe_config,
+    )
+
+    w3 = _get_web3()
+    account = _get_account(w3)
+    ctf = _get_ctf_contract(w3)
+    safe_address = settings.polymarket_funder
+
+    if not safe_address:
+        return MergeResult(
+            condition_id=condition_id,
+            amount_shares=0,
+            amount_usdc=0,
+            gas_cost_matic=0,
+            gas_cost_usd=0,
+            tx_hash="",
+            success=False,
+            error="polymarket_funder_not_set",
+        )
+
+    cond_bytes = bytes.fromhex(condition_id.replace("0x", ""))
+    # 安全のため 1 wei 切り捨て
+    amount_wei = max(0, _shares_to_wei(amount) - 1)
+
+    try:
+        # 1. Safe config 検証 (1-of-1 + owner + version)
+        valid, reason = validate_safe_config(w3, safe_address, account.address)
+        if not valid:
+            return MergeResult(
+                condition_id=condition_id,
+                amount_shares=0,
+                amount_usdc=0,
+                gas_cost_matic=0,
+                gas_cost_usd=0,
+                tx_hash="",
+                success=False,
+                error=f"safe_validation_failed: {reason}",
+            )
+
+        # 2. Token 残高チェック (YES/NO)
+        yes_token_id = _compute_position_token_id(cond_bytes, 1)
+        no_token_id = _compute_position_token_id(cond_bytes, 2)
+
+        bal_ok, bal_reason = check_token_balances(
+            w3, safe_address, settings.merge_ctf_address,
+            yes_token_id, no_token_id, amount_wei,
+        )
+        if not bal_ok:
+            return MergeResult(
+                condition_id=condition_id,
+                amount_shares=0,
+                amount_usdc=0,
+                gas_cost_matic=0,
+                gas_cost_usd=0,
+                tx_hash="",
+                success=False,
+                error=f"token_balance_insufficient: {bal_reason}",
+            )
+
+        # 3. Gas price チェック
+        gas_price = w3.eth.gas_price
+        gas_price_gwei = gas_price / 1e9
+        if gas_price_gwei > settings.merge_gas_buffer_gwei:
+            return MergeResult(
+                condition_id=condition_id,
+                amount_shares=0,
+                amount_usdc=0,
+                gas_cost_matic=0,
+                gas_cost_usd=0,
+                tx_hash="",
+                success=False,
+                error=(
+                    f"gas_price={gas_price_gwei:.1f}gwei"
+                    f" > buffer={settings.merge_gas_buffer_gwei}"
+                ),
+            )
+
+        # 4. MATIC 残高チェック (owner EOA が gas を支払う)
+        matic_balance = float(w3.from_wei(w3.eth.get_balance(account.address), "ether"))
+        estimated_gas_matic = 0.02  # Safe 概算
+        if matic_balance < estimated_gas_matic * 2:
+            return MergeResult(
+                condition_id=condition_id,
+                amount_shares=0,
+                amount_usdc=0,
+                gas_cost_matic=0,
+                gas_cost_usd=0,
+                tx_hash="",
+                success=False,
+                error=f"matic_balance={matic_balance:.4f} < 2x gas={estimated_gas_matic:.4f}",
+            )
+
+        # 5. mergePositions calldata 構築
+        calldata = ctf.functions.mergePositions(
+            w3.to_checksum_address(settings.merge_collateral_address),
+            PARENT_COLLECTION_ID,
+            cond_bytes,
+            BINARY_PARTITION,
+            amount_wei,
+        )._encode_transaction_data()
+
+        # 6. Safe execTransaction 実行
+        receipt = exec_safe_transaction(
+            w3,
+            safe_address,
+            account,
+            to=settings.merge_ctf_address,
+            data=calldata,
+            safe_tx_gas=0,
+            outer_gas_limit=settings.merge_safe_outer_gas_limit,
+        )
+
+        gas_used = receipt["gasUsed"]
+        gas_cost_wei = gas_used * receipt.get("effectiveGasPrice", gas_price)
+        gas_cost_matic = float(w3.from_wei(gas_cost_wei, "ether"))
+        gas_cost_usd = gas_cost_matic * 0.40  # MATIC→USD 概算
+
+        success = receipt["status"] == 1
+        merged_shares = _wei_to_shares(amount_wei) if success else 0
+
+        return MergeResult(
+            condition_id=condition_id,
+            amount_shares=merged_shares,
+            amount_usdc=merged_shares,
+            gas_cost_matic=gas_cost_matic,
+            gas_cost_usd=gas_cost_usd,
+            tx_hash=receipt["transactionHash"].hex(),
+            success=success,
+            error=None if success else "tx_reverted",
+        )
+
+    except Exception as e:
+        logger.exception("mergePositions via Safe failed for condition %s", condition_id)
         return MergeResult(
             condition_id=condition_id,
             amount_shares=0,

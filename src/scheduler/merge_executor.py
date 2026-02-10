@@ -48,7 +48,10 @@ def process_merge_eligible(
 
     logger.info("Found %d MERGE-eligible bothside group(s)", len(eligible))
 
-    is_eoa = settings.polymarket_signature_type == 0
+    sig_type = settings.polymarket_signature_type
+    is_eoa = sig_type == 0
+    is_poly_proxy = sig_type == 1
+    is_supported_wallet = is_eoa or is_poly_proxy
     results: list[JobResult] = []
 
     for bs_gid, dir_job_id, hedge_job_id in eligible:
@@ -96,6 +99,7 @@ def process_merge_eligible(
                 settings,
                 gas_cost_usd=gas_cost_usd,
                 is_eoa=is_eoa,
+                is_supported_wallet=is_supported_wallet,
             )
 
             if not do_merge:
@@ -134,7 +138,12 @@ def process_merge_eligible(
 
             # 実行
             if execution_mode == "live":
-                merge_result = ctf_merge(condition_id, merge_amount)
+                if is_poly_proxy:
+                    from src.connectors.ctf import merge_positions_via_safe
+
+                    merge_result = merge_positions_via_safe(condition_id, merge_amount)
+                else:
+                    merge_result = ctf_merge(condition_id, merge_amount)
                 if merge_result.success:
                     update_merge_operation(
                         merge_id,
