@@ -36,9 +36,9 @@ Polymarket NBA キャリブレーション Bot。Polymarket の構造的ミス�
 | B | Both-Side Betting (directional + hedge) | **完了** |
 | B2 | MERGE (CTF mergePositions — YES+NO→USDC) | **完了** |
 | R | コードベースリファクタリング (500行分割) | **完了** |
+| D | リスク管理 + インフラ強化 (CB, ドリフト, WAL, ログ) | **完了** |
 | B3 | POLY_PROXY / Safe Multisig MERGE 対応 | 未着手 |
 | C | Total (O/U) マーケット校正 | 未着手 |
-| D | リスク管理 (サーキットブレーカー, DD 管理) | 未着手 |
 | E | スケール + 本番運用 ($30-50K) | 未着手 |
 
 ## プロジェクト構成
@@ -77,8 +77,13 @@ nbabot/
 │   │   ├── pnl.py                    # 純関数 P&L 計算 (condition/game 単位)
 │   │   ├── report_generator.py       # P&L レポート生成 (generate_report)
 │   │   └── strategy_profile.py       # 軽量戦略フィンガープリント (Sharpe, DD 等)
-│   ├── execution/                    # 注文実行 (未実装 — Phase 4)
-│   ├── risk/                         # リスク管理 (未実装 — Phase 4)
+│   ├── logging_config.py             # 構造化ログ (JSONFormatter, setup_logging)
+│   ├── execution/                    # 注文実行 (未実装 — Phase E)
+│   ├── risk/
+│   │   ├── models.py                 # RiskState, CircuitBreakerLevel, CalibrationHealthMetrics
+│   │   ├── risk_engine.py            # サーキットブレーカー + 段階的復帰 + degraded mode
+│   │   ├── calibration_monitor.py    # 校正ドリフト検出 (バンド別 z-score)
+│   │   └── health.py                 # 3 階層ヘルスチェック (local/API/integrity)
 │   └── store/
 │       ├── db.py                     # SQLite クエリ関数 (re-export 付き)
 │       ├── models.py                 # データモデル (SignalRecord, TradeJob, JobStatus 等)
@@ -143,6 +148,13 @@ cron (2分ごと)
      ▼
 scripts/schedule_trades.py
      │
+     ├── 0. load_or_compute_risk_state() — リスクチェック (Phase D)
+     │   daily PnL, weekly PnL, 連敗, ドローダウン, 校正ドリフト算出
+     │   → CircuitBreakerLevel (GREEN/YELLOW/ORANGE/RED) + sizing_multiplier
+     │   RED: settle-only モード → DCA 強制停止 → 通知 → 終了
+     │   YELLOW+: DCA 新規エントリー停止
+     │   risk engine 障害時: degraded mode (sizing_multiplier=0.5)
+     │
      ├── 1. refresh_schedule()
      │   NBA.com → trade_jobs テーブルに UPSERT
      │   (試合時刻変更も UPDATE)
@@ -151,7 +163,7 @@ scripts/schedule_trades.py
      │   execute_before < now → expired (pending/failed)
      │   execute_before < now → executed (dca_active — DCA 完了扱い)
      │
-     ├── 3. process_eligible_jobs() — 初回エントリー
+     ├── 3. process_eligible_jobs(sizing_multiplier) — 初回エントリー
      │   execute_after <= now < execute_before かつ status=pending
      │   ├── job_side='directional':
      │   │     → Gamma API で最新価格取得
@@ -184,6 +196,11 @@ scripts/schedule_trades.py
      ├── 4. auto_settle() — DCA グループ + bothside + MERGE 一括決済
      │   DCA グループは VWAP ベース PnL (total_shares * $1 - total_cost)
      │   bothside グループは directional PnL + hedge PnL の combined 計算
+     │   延期試合: settle スキップ + 警告ログ / OT: 正常 settle + 注記
+     │
+     ├── 4b. save_risk_snapshot() — リスク状態永続化 (Phase D)
+     │   キャッシュ無効化 → 再計算 → risk_snapshots テーブルに保存
+     │   レベル変更時: Telegram アラート通知
      │
      └── 5. Telegram サマリー通知
 ```
@@ -289,6 +306,13 @@ Gamma Events API ──→ MoneylineMarket[] ──────────┤
 | `MERGE_CTF_ADDRESS` | No | CTF コントラクトアドレス (default: Polymarket CTF) |
 | `MERGE_COLLATERAL_ADDRESS` | No | USDC コントラクトアドレス (default: USDC.e on Polygon) |
 | `MERGE_POLYGON_RPC` | No | Polygon RPC URL (default: https://polygon-rpc.com) |
+| `DAILY_LOSS_LIMIT_PCT` | No | 日次損失限度 % → ORANGE トリガー (default: 3.0) |
+| `WEEKLY_LOSS_LIMIT_PCT` | No | 週次損失限度 % → RED トリガー (default: 5.0) |
+| `MAX_DRAWDOWN_LIMIT_PCT` | No | 最大ドローダウン % → RED トリガー (default: 15.0) |
+| `RISK_CHECK_ENABLED` | No | リスクチェック有効/無効 (default: true) |
+| `CALIBRATION_DRIFT_THRESHOLD` | No | 校正ドリフト検出閾値 σ (default: 2.0) |
+| `MAX_TOTAL_EXPOSURE_PCT` | No | 資金の最大同時リスク % (default: 30.0) |
+| `RISK_MAX_SINGLE_GAME_USD` | No | 1 試合あたり最大エクスポージャー (default: 200.0) |
 
 ## セキュリティ
 
@@ -327,3 +351,10 @@ Gamma Events API ──→ MoneylineMarket[] ──────────┤
 - `trade_jobs` テーブルのステートマシン: `pending → executing → executed/skipped/failed/expired` + DCA: `executing → dca_active → executed`。
 - Both-side: directional ジョブ処理後に hedge ジョブを pending で作成。hedge は独立 DCA グループで TWAP 実行。combined VWAP ガードで利鞘なし取引を排除。
 - MERGE (Phase B2): CTF `mergePositions` で YES+NO トークンペアを即座に 1 USDC に変換。Post-DCA 一括 MERGE (gas 1 回)。`MERGE_ENABLED` フラグで制御、EOA のみ対応。Paper mode では Web3 不要でシミュレーション。
+- リスク管理 (Phase D): 3 段階サーキットブレーカー (GREEN→YELLOW→ORANGE→RED)。毎 tick で PnL・連敗・ドローダウン・校正ドリフトを算出。RED は手動解除のみ (72h ロック)、ORANGE は 24h 後に自動降格条件あり。段階的復帰メカニズムで即座のフルサイズ復帰を防止。
+- Risk engine 障害時は degraded mode (sizing_multiplier=0.5) で保守的に続行。`RISK_CHECK_ENABLED=false` で無効化可能。
+- 校正ドリフト検出: バンド別の rolling 勝率をテーブル期待勝率と z-score 比較。2σ 超の乖離で ORANGE トリガー。
+- RiskState は `risk_snapshots` テーブルに永続化。cron ステートレス問題を解消。
+- SQLite WAL モード有効。reader-writer 並行性向上 (手動 settle + cron の競合安全化)。
+- 構造化ログ: `STRUCTURED_LOGGING=true` で JSON 出力。TimedRotatingFileHandler (30 日保持)。
+- ヘルスチェック 3 階層: local (毎 tick — DB 接続 + ディスク), API (5 tick 毎 — NBA.com + Polymarket), integrity (日次 — PRAGMA integrity_check)。

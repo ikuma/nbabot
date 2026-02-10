@@ -32,6 +32,7 @@ def calculate_dca_budget(
     capital_risk_pct: float = 2.0,
     liquidity_fill_pct: float = 10.0,
     max_spread_pct: float = 10.0,
+    sizing_multiplier: float = 1.0,
 ) -> DCABudget:
     """Calculate total DCA budget upfront, then divide into equal slices.
 
@@ -44,9 +45,10 @@ def calculate_dca_budget(
         capital_risk_pct: Max % of balance per position.
         liquidity_fill_pct: Max % of ask_depth_5c to consume.
         max_spread_pct: Skip if spread exceeds this %.
+        sizing_multiplier: Risk-adjusted multiplier applied to Kelly (1.0 = normal).
     """
     num_entries = max(num_entries, 1)
-    raw_total = max(kelly_usd, 0.0) * num_entries
+    raw_total = max(kelly_usd * sizing_multiplier, 0.0) * num_entries
 
     # 残高制約 (DCA 全体で)
     if balance_usd is not None and balance_usd > 0:

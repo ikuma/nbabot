@@ -21,4 +21,7 @@ mkdir -p "$LOG_DIR"
 DATE=$(date +%Y-%m-%d)
 LOG_FILE="${LOG_DIR}/scheduler-${DATE}.log"
 
+# ログローテーション (30日超ファイル削除)
+find "$LOG_DIR" -name "scheduler-*.log" -mtime +30 -delete 2>/dev/null || true
+
 "$PYTHON" "${PROJECT_DIR}/scripts/schedule_trades.py" >> "$LOG_FILE" 2>&1

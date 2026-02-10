@@ -21,7 +21,7 @@ from src.store.db import (
     get_eligible_jobs,
     get_executing_jobs,
     get_job_summary,
-    has_signal_for_slug,
+    has_signal_for_slug_and_side,
     update_job_status,
     upsert_trade_job,
 )
@@ -146,21 +146,25 @@ def recover_executing_jobs(db_path: str | None = None) -> int:
 
     recovered = 0
     for job in stuck:
-        if has_signal_for_slug(job.event_slug, db_path=path):
+        # bothside 区別: job_side に対応する signal_role でチェック
+        signal_role = "hedge" if job.job_side == "hedge" else "directional"
+        if has_signal_for_slug_and_side(job.event_slug, signal_role, db_path=path):
             # 発注済み — executed に
             update_job_status(job.id, "executed", db_path=path)
             logger.info(
-                "Recovered job %d (%s): executing → executed (signal found)",
+                "Recovered job %d (%s/%s): executing → executed (signal found)",
                 job.id,
                 job.event_slug,
+                job.job_side,
             )
         else:
             # 発注未完了 — pending に戻す
             update_job_status(job.id, "pending", db_path=path)
             logger.info(
-                "Recovered job %d (%s): executing → pending (no signal)",
+                "Recovered job %d (%s/%s): executing → pending (no signal)",
                 job.id,
                 job.event_slug,
+                job.job_side,
             )
         recovered += 1
 
@@ -175,12 +179,14 @@ def recover_executing_jobs(db_path: str | None = None) -> int:
 def process_eligible_jobs(
     execution_mode: str = "paper",
     db_path: str | None = None,
+    sizing_multiplier: float = 1.0,
 ) -> list[JobResult]:
     """Process trade jobs whose execution window is currently open.
 
     Args:
         execution_mode: "paper" (log signal only), "live" (real orders),
                        or "dry-run" (log output only).
+        sizing_multiplier: Risk-adjusted multiplier for Kelly sizing (1.0 = normal).
     """
     from src.connectors.polymarket import fetch_moneyline_for_game, place_limit_buy
     from src.scheduler.hedge_executor import process_hedge_job
@@ -201,7 +207,10 @@ def process_eligible_jobs(
         logger.info("No eligible jobs in execution window")
         return []
 
-    logger.info("Found %d eligible job(s)", len(eligible))
+    logger.info(
+        "Found %d eligible job(s) (sizing_multiplier=%.2f)",
+        len(eligible), sizing_multiplier,
+    )
 
     # 暴走防止: 1 tick あたりの最大発注数
     max_per_tick = settings.max_orders_per_tick
@@ -237,6 +246,7 @@ def process_eligible_jobs(
                 log_signal,
                 place_limit_buy,
                 update_order_status,
+                sizing_multiplier=sizing_multiplier,
             )
             result = jr
 

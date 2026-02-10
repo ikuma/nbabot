@@ -43,7 +43,7 @@ def main() -> None:
         process_merge_eligible,
         refresh_schedule,
     )
-    from src.store.db import cancel_expired_jobs
+    from src.store.db import DEFAULT_DB_PATH, cancel_expired_jobs
 
     parser = argparse.ArgumentParser(description="Per-game trade scheduler")
     parser.add_argument(
@@ -68,12 +68,80 @@ def main() -> None:
     execution_mode = args.execution or settings.execution_mode
     game_date = args.date or datetime.now(timezone.utc).astimezone(ET).strftime("%Y-%m-%d")
     now_utc = datetime.now(timezone.utc).isoformat()
+    db_path = str(DEFAULT_DB_PATH)
 
     log.info(
         "=== Scheduler tick (date=%s, execution=%s) ===",
         game_date,
         execution_mode,
     )
+
+    # 0. リスクチェック
+    risk_level_name = "GREEN"
+    sizing_multiplier = 1.0
+    try:
+        from src.risk.models import CircuitBreakerLevel
+        from src.risk.risk_engine import load_or_compute_risk_state
+
+        risk_state = load_or_compute_risk_state(db_path)
+        risk_level_name = risk_state.circuit_breaker_level.name
+        sizing_multiplier = risk_state.sizing_multiplier
+        log.info(
+            "Risk state: level=%s multiplier=%.2f daily_pnl=$%.2f flags=%s",
+            risk_level_name,
+            sizing_multiplier,
+            risk_state.daily_pnl,
+            risk_state.flags,
+        )
+
+        if risk_state.circuit_breaker_level >= CircuitBreakerLevel.RED:
+            log.warning("Circuit breaker RED — skipping to settle-only mode")
+            # RED: settle のみ実行して通知して終了
+            if not args.no_settle:
+                try:
+                    from src.settlement.settler import auto_settle
+
+                    settle_summary = auto_settle()
+                    if settle_summary.settled:
+                        log.info("Auto-settle: %s", settle_summary.format_summary())
+                except Exception:
+                    log.exception("Auto-settle failed")
+
+            try:
+                from src.notifications.telegram import send_message
+
+                send_message(
+                    f"*Circuit Breaker RED*\nTrading halted. "
+                    f"Daily PnL: ${risk_state.daily_pnl:+.2f}\n"
+                    f"Flags: {', '.join(risk_state.flags) or 'none'}"
+                )
+            except Exception:
+                log.exception("Telegram notification failed")
+
+            # DCA 強制停止
+            from src.store.db import force_stop_dca_jobs
+
+            stopped = force_stop_dca_jobs(db_path=db_path)
+            if stopped:
+                log.info("Force-stopped %d DCA jobs (RED)", stopped)
+
+            # snapshot 保存
+            from src.store.db import save_risk_snapshot
+
+            save_risk_snapshot(risk_state, db_path=db_path)
+            return
+
+        # YELLOW 以上: DCA 新規エントリー停止
+        if risk_state.circuit_breaker_level >= CircuitBreakerLevel.YELLOW:
+            from src.store.db import force_stop_dca_jobs
+
+            stopped = force_stop_dca_jobs(db_path=db_path)
+            if stopped:
+                log.info("Force-stopped %d DCA jobs (YELLOW+)", stopped)
+
+    except Exception:
+        log.exception("Risk check failed — continuing in degraded mode")
+        sizing_multiplier = 0.5
 
     # 1. スケジュール更新
     new_jobs = refresh_schedule(game_date)
@@ -85,7 +153,7 @@ def main() -> None:
         log.info("Expired %d job(s)", expired)
 
     # 3. 窓内ジョブ実行 (初回エントリー)
-    results = process_eligible_jobs(execution_mode)
+    results = process_eligible_jobs(execution_mode, sizing_multiplier=sizing_multiplier)
 
     executed = [r for r in results if r.status == "executed"]
     skipped = [r for r in results if r.status == "skipped"]
@@ -133,6 +201,32 @@ def main() -> None:
         except Exception:
             log.exception("Auto-settle failed (continuing)")
 
+    # 4b. リスク snapshot 保存
+    try:
+        from src.risk.risk_engine import invalidate_cache, load_or_compute_risk_state
+        from src.store.db import save_risk_snapshot
+
+        invalidate_cache()
+        risk_state = load_or_compute_risk_state(db_path)
+        save_risk_snapshot(risk_state, db_path=db_path)
+
+        # レベル変更があった場合に通知
+        if risk_state.circuit_breaker_level.name != risk_level_name:
+            try:
+                from src.notifications.telegram import send_message
+
+                new_level = risk_state.circuit_breaker_level.name
+                send_message(
+                    f"*Risk Level Changed: {risk_level_name} → "
+                    f"{new_level}*\n"
+                    f"Daily PnL: ${risk_state.daily_pnl:+.2f} | "
+                    f"Multiplier: {risk_state.sizing_multiplier:.2f}"
+                )
+            except Exception:
+                log.exception("Risk alert notification failed")
+    except Exception:
+        log.exception("Risk snapshot save failed")
+
     # 5. Telegram 通知
     try:
         summary_text = format_tick_summary(
@@ -152,6 +246,7 @@ def main() -> None:
     # サマリー出力
     print(f"\n{'=' * 50}")
     print(f"  Scheduler tick: {game_date} [{execution_mode}]")
+    print(f"  Risk: {risk_level_name} | Sizing: {sizing_multiplier:.2f}x")
     print(f"  New jobs: {new_jobs} | Expired: {expired}")
     print(f"  Executed: {len(executed)} | Skipped: {len(skipped)} | Failed: {len(failed)}")
     if dca_executed:

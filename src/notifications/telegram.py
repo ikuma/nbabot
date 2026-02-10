@@ -31,6 +31,12 @@ def send_message(text: str, parse_mode: str = "Markdown") -> bool:
         )
         resp.raise_for_status()
         return True
+    except httpx.HTTPStatusError as e:
+        logger.error("Telegram HTTP error %d: %s", e.response.status_code, e)
+        return False
+    except httpx.TimeoutException:
+        logger.warning("Telegram request timed out")
+        return False
     except Exception:
         logger.exception("Failed to send Telegram message")
         return False
@@ -55,6 +61,28 @@ def format_order_notification(
         lines.append(f"Edge: {edge_pct:.1f}%")
     lines.append(f"Order: `{order_id}`")
     return "\n".join(lines)
+
+
+def send_risk_alert(level: str, trigger: str, daily_pnl: float = 0.0) -> bool:
+    """Send circuit breaker level change alert."""
+    text = (
+        f"*Risk Alert: {level}*\n"
+        f"Trigger: {trigger}\n"
+        f"Daily PnL: ${daily_pnl:+.2f}"
+    )
+    return send_message(text)
+
+
+def send_health_alert(messages: list[str]) -> bool:
+    """Send health check failure notification."""
+    text = "*Health Check Alert*\n" + "\n".join(f"- {m}" for m in messages)
+    return send_message(text)
+
+
+def send_error_alert(error_type: str, message: str) -> bool:
+    """Send error notification (order failure, etc.)."""
+    text = f"*Error: {error_type}*\n{message}"
+    return send_message(text)
 
 
 def format_opportunities(opportunities: list) -> str:

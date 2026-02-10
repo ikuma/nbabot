@@ -202,10 +202,37 @@ def _refresh_order_statuses(db_path: Path | str | None = None) -> None:
 
 
 def _determine_winner(game: NBAGame) -> str | None:
-    """Determine winner from final scores. Returns full team name or None."""
+    """Determine winner from final scores. Returns full team name or None.
+
+    Returns None for postponed games (settle skipped with warning).
+    """
+    # 延期試合チェック
+    status_text = getattr(game, "game_status_text", "").lower()
+    if "postpone" in status_text or "cancel" in status_text:
+        log.warning(
+            "Game %s vs %s is postponed/cancelled — skipping settle",
+            game.away_team, game.home_team,
+        )
+        return None
+
     if game.home_score > game.away_score:
+        # OT 検出 (ログ注記)
+        period = getattr(game, "period", 0)
+        if period > 4:
+            ot_count = period - 4
+            log.info(
+                "Game %s vs %s went to %dOT (final: %d-%d)",
+                game.away_team, game.home_team, ot_count, game.away_score, game.home_score,
+            )
         return game.home_team
     elif game.away_score > game.home_score:
+        period = getattr(game, "period", 0)
+        if period > 4:
+            ot_count = period - 4
+            log.info(
+                "Game %s vs %s went to %dOT (final: %d-%d)",
+                game.away_team, game.home_team, ot_count, game.away_score, game.home_score,
+            )
         return game.away_team
     return None  # tie (shouldn't happen in NBA)
 

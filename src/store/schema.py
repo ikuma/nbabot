@@ -273,12 +273,63 @@ def _ensure_merge_columns(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+RISK_TABLES_SQL = """
+CREATE TABLE IF NOT EXISTS circuit_breaker_events (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    level           INTEGER NOT NULL,
+    trigger         TEXT NOT NULL,
+    risk_state_json TEXT,
+    created_at      TEXT NOT NULL,
+    resolved_at     TEXT,
+    resolved_by     TEXT
+);
+
+CREATE TABLE IF NOT EXISTS risk_snapshots (
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    checked_at          TEXT NOT NULL,
+    level               TEXT NOT NULL DEFAULT 'GREEN',
+    daily_pnl           REAL NOT NULL DEFAULT 0.0,
+    weekly_pnl          REAL NOT NULL DEFAULT 0.0,
+    consecutive_losses  INTEGER NOT NULL DEFAULT 0,
+    max_drawdown_pct    REAL NOT NULL DEFAULT 0.0,
+    open_exposure       REAL NOT NULL DEFAULT 0.0,
+    sizing_multiplier   REAL NOT NULL DEFAULT 1.0,
+    lockout_until       TEXT,
+    last_balance_usd    REAL,
+    flags               TEXT DEFAULT '[]'
+);
+"""
+
+
+def _ensure_risk_tables(conn: sqlite3.Connection) -> None:
+    """Create risk management tables if they don't exist."""
+    conn.executescript(RISK_TABLES_SQL)
+    conn.commit()
+
+
+def _ensure_indexes(conn: sqlite3.Connection) -> None:
+    """Create performance indexes if they don't exist."""
+    indexes = [
+        "CREATE INDEX IF NOT EXISTS idx_signals_event_slug ON signals(event_slug)",
+        "CREATE INDEX IF NOT EXISTS idx_signals_dca_group ON signals(dca_group_id)",
+        "CREATE INDEX IF NOT EXISTS idx_signals_bothside_group ON signals(bothside_group_id)",
+        "CREATE INDEX IF NOT EXISTS idx_signals_created_at ON signals(created_at)",
+        "CREATE INDEX IF NOT EXISTS idx_results_settled_at ON results(settled_at)",
+        "CREATE INDEX IF NOT EXISTS idx_trade_jobs_status ON trade_jobs(status)",
+        "CREATE INDEX IF NOT EXISTS idx_trade_jobs_game_date ON trade_jobs(game_date)",
+    ]
+    for sql in indexes:
+        conn.execute(sql)
+    conn.commit()
+
+
 def _connect(db_path: Path | str = DEFAULT_DB_PATH) -> sqlite3.Connection:
     """Open (or create) the SQLite database and ensure schema exists."""
     db_path = Path(db_path)
     db_path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(db_path))
     conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL")
     conn.executescript(SCHEMA_SQL)
     conn.executescript(TRADE_JOBS_SQL)
     _ensure_calibration_columns(conn)
@@ -287,4 +338,6 @@ def _connect(db_path: Path | str = DEFAULT_DB_PATH) -> sqlite3.Connection:
     _ensure_dca_columns(conn)
     _ensure_bothside_columns(conn)
     _ensure_merge_columns(conn)
+    _ensure_risk_tables(conn)
+    _ensure_indexes(conn)
     return conn

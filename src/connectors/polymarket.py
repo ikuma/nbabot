@@ -437,7 +437,10 @@ def fetch_moneyline_for_game(
         )
         resp.raise_for_status()
         data = resp.json()
-    except Exception:
+    except (httpx.HTTPStatusError, httpx.TimeoutException) as e:
+        logger.error("Events API request failed for slug=%s: %s", slug, e)
+        return None
+    except httpx.HTTPError:
         logger.exception("Events API request failed for slug=%s", slug)
         return None
 

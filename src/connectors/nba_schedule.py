@@ -30,6 +30,8 @@ class NBAGame:
     game_status: int  # 1=scheduled, 2=in-progress, 3=final
     home_score: int = 0
     away_score: int = 0
+    period: int = 0  # 1-4 = regulation, 5+ = OT
+    game_status_text: str = ""  # "Final", "Final/OT", "Postponed" etc.
 
 
 def fetch_todays_games() -> list[NBAGame]:
@@ -44,6 +46,9 @@ def fetch_todays_games() -> list[NBAGame]:
         resp = httpx.get(url, timeout=15)
         resp.raise_for_status()
         data = resp.json()
+    except httpx.TimeoutException:
+        logger.error("NBA.com scoreboard request timed out")
+        return []
     except httpx.HTTPError:
         logger.exception("NBA.com scoreboard request failed")
         return []
@@ -73,6 +78,8 @@ def fetch_todays_games() -> list[NBAGame]:
                 game_status=g.get("gameStatus", 0),
                 home_score=home.get("score", 0),
                 away_score=away.get("score", 0),
+                period=g.get("period", 0),
+                game_status_text=g.get("gameStatusText", ""),
             )
         )
 
@@ -98,6 +105,9 @@ def _fetch_season_schedule() -> list[dict]:
         resp = httpx.get(NBA_SCHEDULE_URL, timeout=15)
         resp.raise_for_status()
         data = resp.json()
+    except httpx.TimeoutException:
+        logger.error("NBA.com season schedule request timed out")
+        return []
     except httpx.HTTPError:
         logger.exception("NBA.com season schedule request failed")
         return []

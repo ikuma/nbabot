@@ -920,3 +920,295 @@ def update_job_merge_status(
         conn.commit()
     finally:
         conn.close()
+
+
+# ---------------------------------------------------------------------------
+# Risk management queries (Phase D)
+# ---------------------------------------------------------------------------
+
+
+def get_daily_results(
+    date_str: str,
+    db_path: Path | str = DEFAULT_DB_PATH,
+) -> dict:
+    """Get aggregated PnL for a single date. Returns {"pnl": float, "wins": int, "losses": int}."""
+    conn = _connect(db_path)
+    try:
+        row = conn.execute(
+            """SELECT
+                 COALESCE(SUM(r.pnl), 0.0) AS pnl,
+                 COALESCE(SUM(CASE WHEN r.won = 1 THEN 1 ELSE 0 END), 0) AS wins,
+                 COALESCE(SUM(CASE WHEN r.won = 0 THEN 1 ELSE 0 END), 0) AS losses
+               FROM results r
+               WHERE r.settled_at LIKE ?""",
+            (f"{date_str}%",),
+        ).fetchone()
+        return {"pnl": float(row[0]), "wins": int(row[1]), "losses": int(row[2])}
+    finally:
+        conn.close()
+
+
+def get_weekly_results(
+    end_date: str,
+    db_path: Path | str = DEFAULT_DB_PATH,
+) -> dict:
+    """Get aggregated PnL for the 7 days ending on end_date (inclusive)."""
+    from datetime import timedelta
+
+    try:
+        end_dt = datetime.strptime(end_date, "%Y-%m-%d")
+    except ValueError:
+        return {"pnl": 0.0, "wins": 0, "losses": 0}
+    start_dt = end_dt - timedelta(days=6)
+    start_str = start_dt.strftime("%Y-%m-%d")
+
+    conn = _connect(db_path)
+    try:
+        row = conn.execute(
+            """SELECT
+                 COALESCE(SUM(r.pnl), 0.0) AS pnl,
+                 COALESCE(SUM(CASE WHEN r.won = 1 THEN 1 ELSE 0 END), 0) AS wins,
+                 COALESCE(SUM(CASE WHEN r.won = 0 THEN 1 ELSE 0 END), 0) AS losses
+               FROM results r
+               WHERE r.settled_at >= ? AND r.settled_at < ?""",
+            (start_str, end_date + "T99"),  # end_date 当日を含む
+        ).fetchone()
+        return {"pnl": float(row[0]), "wins": int(row[1]), "losses": int(row[2])}
+    finally:
+        conn.close()
+
+
+def get_consecutive_losses(
+    db_path: Path | str = DEFAULT_DB_PATH,
+) -> int:
+    """Count consecutive losses from most recent results (DESC order).
+
+    Bothside MERGE ペアは除外 (リスクフリー).
+    """
+    conn = _connect(db_path)
+    try:
+        rows = conn.execute(
+            """SELECT r.won, s.bothside_group_id, s.signal_role
+               FROM results r
+               JOIN signals s ON s.id = r.signal_id
+               ORDER BY r.settled_at DESC
+               LIMIT 50""",
+        ).fetchall()
+        count = 0
+        for row in rows:
+            # MERGE ペアの hedge は連敗カウントから除外
+            if row["signal_role"] == "hedge":
+                continue
+            if row["won"]:
+                break
+            count += 1
+        return count
+    finally:
+        conn.close()
+
+
+def get_open_exposure(
+    db_path: Path | str = DEFAULT_DB_PATH,
+) -> float:
+    """Sum of kelly_size for unsettled signals (bothside ネット考慮)."""
+    conn = _connect(db_path)
+    try:
+        row = conn.execute(
+            """SELECT COALESCE(SUM(s.kelly_size), 0.0)
+               FROM signals s
+               LEFT JOIN results r ON r.signal_id = s.id
+               WHERE r.id IS NULL""",
+        ).fetchone()
+        return float(row[0])
+    finally:
+        conn.close()
+
+
+def save_risk_snapshot(
+    state,  # RiskState (avoid circular import)
+    db_path: Path | str = DEFAULT_DB_PATH,
+) -> int:
+    """Persist a RiskState snapshot to risk_snapshots table."""
+    import json
+
+    conn = _connect(db_path)
+    try:
+        cur = conn.execute(
+            """INSERT INTO risk_snapshots
+               (checked_at, level, daily_pnl, weekly_pnl, consecutive_losses,
+                max_drawdown_pct, open_exposure, sizing_multiplier,
+                lockout_until, last_balance_usd, flags)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                state.checked_at,
+                state.circuit_breaker_level.name,
+                state.daily_pnl,
+                state.weekly_pnl,
+                state.consecutive_losses,
+                state.max_drawdown_pct,
+                state.open_exposure,
+                state.sizing_multiplier,
+                state.lockout_until,
+                state.current_balance,
+                json.dumps(state.flags),
+            ),
+        )
+        conn.commit()
+        return cur.lastrowid  # type: ignore[return-value]
+    finally:
+        conn.close()
+
+
+def get_latest_risk_snapshot(
+    db_path: Path | str = DEFAULT_DB_PATH,
+):
+    """Get the most recent RiskState snapshot, or None."""
+    import json
+
+    from src.risk.models import CircuitBreakerLevel, RiskState
+
+    conn = _connect(db_path)
+    try:
+        row = conn.execute(
+            "SELECT * FROM risk_snapshots ORDER BY id DESC LIMIT 1",
+        ).fetchone()
+        if not row:
+            return None
+        d = dict(row)
+        level_name = d.get("level", "GREEN")
+        try:
+            level = CircuitBreakerLevel[level_name]
+        except (KeyError, ValueError):
+            level = CircuitBreakerLevel.GREEN
+        flags_raw = d.get("flags", "[]")
+        try:
+            flags = json.loads(flags_raw) if flags_raw else []
+        except (json.JSONDecodeError, TypeError):
+            flags = []
+        return RiskState(
+            daily_pnl=d.get("daily_pnl", 0.0),
+            weekly_pnl=d.get("weekly_pnl", 0.0),
+            consecutive_losses=d.get("consecutive_losses", 0),
+            max_drawdown_pct=d.get("max_drawdown_pct", 0.0),
+            open_exposure=d.get("open_exposure", 0.0),
+            current_balance=d.get("last_balance_usd", 0.0) or 0.0,
+            last_known_balance=d.get("last_balance_usd", 0.0) or 0.0,
+            circuit_breaker_level=level,
+            sizing_multiplier=d.get("sizing_multiplier", 1.0),
+            lockout_until=d.get("lockout_until"),
+            flags=flags,
+            checked_at=d.get("checked_at", ""),
+        )
+    finally:
+        conn.close()
+
+
+def log_circuit_breaker_event(
+    level: int,
+    trigger: str,
+    risk_state_json: str | None = None,
+    db_path: Path | str = DEFAULT_DB_PATH,
+) -> int:
+    """Log a circuit breaker level change event."""
+    now = datetime.now(timezone.utc).isoformat()
+    conn = _connect(db_path)
+    try:
+        cur = conn.execute(
+            """INSERT INTO circuit_breaker_events (level, trigger, risk_state_json, created_at)
+               VALUES (?, ?, ?, ?)""",
+            (level, trigger, risk_state_json, now),
+        )
+        conn.commit()
+        return cur.lastrowid  # type: ignore[return-value]
+    finally:
+        conn.close()
+
+
+def get_active_circuit_breaker(
+    db_path: Path | str = DEFAULT_DB_PATH,
+) -> dict | None:
+    """Get the most recent unresolved CB event, or None."""
+    conn = _connect(db_path)
+    try:
+        row = conn.execute(
+            """SELECT * FROM circuit_breaker_events
+               WHERE resolved_at IS NULL
+               ORDER BY id DESC LIMIT 1""",
+        ).fetchone()
+        return dict(row) if row else None
+    finally:
+        conn.close()
+
+
+def resolve_circuit_breaker(
+    event_id: int,
+    resolved_by: str = "auto",
+    db_path: Path | str = DEFAULT_DB_PATH,
+) -> None:
+    """Mark a CB event as resolved."""
+    now = datetime.now(timezone.utc).isoformat()
+    conn = _connect(db_path)
+    try:
+        conn.execute(
+            """UPDATE circuit_breaker_events
+               SET resolved_at = ?, resolved_by = ?
+               WHERE id = ?""",
+            (now, resolved_by, event_id),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def get_band_win_rates(
+    db_path: Path | str = DEFAULT_DB_PATH,
+) -> dict[str, dict]:
+    """Get per-band win rates from settled results.
+
+    Returns {band_label: {"wins": int, "losses": int, "total": int}}.
+    """
+    conn = _connect(db_path)
+    try:
+        rows = conn.execute(
+            """SELECT s.price_band, r.won, COUNT(*) as cnt
+               FROM results r
+               JOIN signals s ON s.id = r.signal_id
+               WHERE s.price_band IS NOT NULL AND s.price_band != ''
+                 AND s.strategy_mode = 'calibration'
+               GROUP BY s.price_band, r.won""",
+        ).fetchall()
+        result: dict[str, dict] = {}
+        for row in rows:
+            band = row["price_band"]
+            if band not in result:
+                result[band] = {"wins": 0, "losses": 0, "total": 0}
+            if row["won"]:
+                result[band]["wins"] += row["cnt"]
+            else:
+                result[band]["losses"] += row["cnt"]
+            result[band]["total"] += row["cnt"]
+        return result
+    finally:
+        conn.close()
+
+
+def force_stop_dca_jobs(
+    db_path: Path | str = DEFAULT_DB_PATH,
+) -> int:
+    """Force all dca_active jobs to executed (YELLOW+ CB response).
+
+    Returns the number of jobs stopped.
+    """
+    now = datetime.now(timezone.utc).isoformat()
+    conn = _connect(db_path)
+    try:
+        cur = conn.execute(
+            """UPDATE trade_jobs
+               SET status = 'executed', updated_at = ?
+               WHERE status = 'dca_active'""",
+            (now,),
+        )
+        conn.commit()
+        return cur.rowcount
+    finally:
+        conn.close()

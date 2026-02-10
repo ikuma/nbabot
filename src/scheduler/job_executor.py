@@ -85,8 +85,12 @@ def process_single_job(
     log_signal,
     place_limit_buy,
     update_order_status,
+    sizing_multiplier: float = 1.0,
 ) -> tuple[JobResult, object | None]:
     """Process a single directional trade job through the state machine.
+
+    Args:
+        sizing_multiplier: Risk-adjusted multiplier (1.0 = normal, <1.0 = reduced).
 
     Returns (JobResult, bothside_opp_or_None).
     """
@@ -186,6 +190,7 @@ def process_single_job(
             capital_risk_pct=settings.capital_risk_pct,
             liquidity_fill_pct=settings.liquidity_fill_pct,
             max_spread_pct=settings.max_spread_pct,
+            sizing_multiplier=sizing_multiplier,
         )
 
         if budget.slice_size_usd <= 0:

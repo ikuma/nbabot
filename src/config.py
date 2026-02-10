@@ -32,6 +32,14 @@ class Settings(BaseSettings):
     min_edge_pct: float = 1.0
     kelly_fraction: float = 0.25
 
+    # === Risk management (Phase D) ===
+    weekly_loss_limit_pct: float = 5.0
+    max_drawdown_limit_pct: float = 15.0
+    risk_check_enabled: bool = True
+    calibration_drift_threshold: float = 2.0
+    max_total_exposure_pct: float = 30.0
+    risk_max_single_game_usd: float = 200.0
+
     # === Calibration strategy ===
     strategy_mode: str = "calibration"  # "calibration" | "bookmaker"
     sweet_spot_lo: float = 0.20
