@@ -1,12 +1,16 @@
 #!/bin/bash
-# Per-game trade scheduler — called by crontab every 5 minutes
+# Per-game trade scheduler — called by crontab every 15 minutes
 # Logs to data/logs/scheduler-YYYY-MM-DD.log
 
 set -euo pipefail
 
-# 多重起動防止 (別ロックファイルで cron_scan.sh と共存可能)
-exec 200>/tmp/nbabot-scheduler.lock
-flock -n 200 || exit 0
+LOCKDIR="/tmp/nbabot-scheduler.lock"
+
+# 多重起動防止 (mkdir はアトミック — macOS/Linux 両対応)
+if ! mkdir "$LOCKDIR" 2>/dev/null; then
+    exit 0
+fi
+trap 'rmdir "$LOCKDIR"' EXIT
 
 PROJECT_DIR="/Users/taro/dev/nbabot"
 PYTHON="${PROJECT_DIR}/.venv/bin/python"

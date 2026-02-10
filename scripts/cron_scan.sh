@@ -4,6 +4,15 @@
 
 set -euo pipefail
 
+LOCKDIR="/tmp/nbabot-scan.lock"
+
+# 多重起動防止 (mkdir はアトミック — macOS/Linux 両対応)
+if ! mkdir "$LOCKDIR" 2>/dev/null; then
+    echo "Already running"
+    exit 1
+fi
+trap 'rmdir "$LOCKDIR"' EXIT
+
 PROJECT_DIR="/Users/taro/dev/nbabot"
 PYTHON="${PROJECT_DIR}/.venv/bin/python"
 LOG_DIR="${PROJECT_DIR}/data/logs"
