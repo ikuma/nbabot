@@ -17,7 +17,7 @@ Usage:
 
 import argparse
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -66,13 +66,26 @@ def main() -> None:
     args = parser.parse_args()
 
     execution_mode = args.execution or settings.execution_mode
-    game_date = args.date or datetime.now(timezone.utc).astimezone(ET).strftime("%Y-%m-%d")
+    now_et = datetime.now(timezone.utc).astimezone(ET)
     now_utc = datetime.now(timezone.utc).isoformat()
     db_path = str(DEFAULT_DB_PATH)
 
+    # ゲーム日付: today + tomorrow (ET) の両日を探索 — タイムゾーン境界対策
+    # NBA.com のゲーム日付は ET ベースだが、境界付近で日付がずれるケースがある。
+    # "dumb scheduler, smart worker" パターン: cron は 24/7 ハートビート、
+    # スクリプト内で実行窓 (execute_after/execute_before) 判定するため安全。
+    if args.date:
+        dates_to_refresh = [args.date]
+        game_date = args.date  # 表示用
+    else:
+        today_et = now_et.strftime("%Y-%m-%d")
+        tomorrow_et = (now_et + timedelta(days=1)).strftime("%Y-%m-%d")
+        dates_to_refresh = [today_et, tomorrow_et]
+        game_date = today_et  # 表示用
+
     log.info(
-        "=== Scheduler tick (date=%s, execution=%s) ===",
-        game_date,
+        "=== Scheduler tick (dates=%s, execution=%s) ===",
+        "+".join(dates_to_refresh),
         execution_mode,
     )
 
@@ -143,9 +156,11 @@ def main() -> None:
         log.exception("Risk check failed — continuing in degraded mode")
         sizing_multiplier = 0.5
 
-    # 1. スケジュール更新
-    new_jobs = refresh_schedule(game_date)
-    log.info("Schedule refresh: %d new job(s)", new_jobs)
+    # 1. スケジュール更新 — today + tomorrow (ET) を探索
+    new_jobs = 0
+    for d in dates_to_refresh:
+        new_jobs += refresh_schedule(d)
+    log.info("Schedule refresh (%s): %d new job(s)", "+".join(dates_to_refresh), new_jobs)
 
     # 2. 期限切れ処理
     expired = cancel_expired_jobs(now_utc)

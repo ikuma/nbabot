@@ -83,20 +83,22 @@ class AutoSettleSummary:
         ]
         for r in self.settled:
             status = "WIN" if r.won else "LOSS"
+            # Telegram Markdown V1: _ をエスケープ (italic 誤解釈防止)
+            method = r.method.replace("_", "\\_")
             if r.is_merged:
                 lines.append(
-                    f"  #{r.signal_id} [MERGE] {r.team}: "
+                    f"  #{r.signal_id} \\[MERGE] {r.team}: "
                     f"MERGE=${r.merge_pnl:+.2f} REM=${r.remainder_pnl:+.2f} "
-                    f"NET=${r.pnl:+.2f} ({r.method})"
+                    f"NET=${r.pnl:+.2f} ({method})"
                 )
             elif r.is_bothside:
                 lines.append(
-                    f"  #{r.signal_id} [BOTHSIDE] {r.team}: "
+                    f"  #{r.signal_id} \\[BOTHSIDE] {r.team}: "
                     f"DIR=${r.dir_pnl:+.2f} HEDGE=${r.hedge_pnl:+.2f} "
-                    f"NET=${r.pnl:+.2f} ({r.method})"
+                    f"NET=${r.pnl:+.2f} ({method})"
                 )
             else:
-                lines.append(f"  #{r.signal_id} {r.team}: {status} ${r.pnl:+.2f} ({r.method})")
+                lines.append(f"  #{r.signal_id} {r.team}: {status} ${r.pnl:+.2f} ({method})")
         return "\n".join(lines)
 
 
@@ -277,10 +279,11 @@ def auto_settle(
     """Auto-settle unsettled signals using NBA.com scores + Polymarket fallback.
 
     Args:
-        today: Override today's date (YYYY-MM-DD) for testing. Defaults to actual today.
+        today: Override today's date (YYYY-MM-DD) for testing. Defaults to today in ET.
     """
     from collections import defaultdict
-    from datetime import date
+    from datetime import datetime, timezone
+    from zoneinfo import ZoneInfo
 
     from src.connectors.nba_schedule import fetch_todays_games
     from src.connectors.team_mapping import full_name_from_abbr, get_team_short_name
@@ -360,7 +363,10 @@ def auto_settle(
     for g in final_games:
         game_index[(g.home_team, g.away_team)] = g
 
-    today_str = today or date.today().strftime("%Y-%m-%d")
+    # NBA.com スコアボードは ET ベース — ローカル TZ ではなく ET の日付を使用
+    today_str = today or datetime.now(timezone.utc).astimezone(
+        ZoneInfo("America/New_York")
+    ).strftime("%Y-%m-%d")
 
     for signal, dca_group in signals_to_process:
         parsed = _parse_slug(signal.event_slug)

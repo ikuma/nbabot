@@ -1,7 +1,8 @@
 """Per-game trade scheduler: cron-driven state machine with SQLite job queue.
 
-Each NBA game gets a trade_job with an execution window (tipoff - 2h to tipoff).
-A 5-minute cron tick calls refresh → expire → process, executing orders only
+Each NBA game gets a trade_job with an execution window
+(tipoff - SCHEDULE_WINDOW_HOURS to tipoff).
+A 15-minute cron tick calls refresh → expire → process, executing orders only
 for games whose window is currently open.
 """
 
@@ -44,17 +45,15 @@ def refresh_schedule(
 
     Returns the number of newly inserted jobs.
     """
-    from src.connectors.nba_schedule import fetch_games_for_date, fetch_todays_games
+    from src.connectors.nba_schedule import fetch_games_for_date
     from src.connectors.team_mapping import build_event_slug
 
     path = db_path or DEFAULT_DB_PATH
 
-    # 今日の日付判定
-    today_str = datetime.now(timezone.utc).astimezone(ET).strftime("%Y-%m-%d")
-    if game_date == today_str:
-        games = fetch_todays_games()
-    else:
-        games = fetch_games_for_date(game_date)
+    # シーズンスケジュール API でゲーム発見 (ET ベースの日付に対応)
+    # NOTE: fetch_todays_games() は NBA.com ライブスコアボード (UTC ベース) なので
+    # ET 日付とズレる場合がある。refresh_schedule では常に fetch_games_for_date を使用。
+    games = fetch_games_for_date(game_date)
 
     if not games:
         logger.info("No games found for %s", game_date)

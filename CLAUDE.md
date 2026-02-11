@@ -93,7 +93,7 @@ nbabot/
 │   ├── scan.py                       # 日次エッジスキャン (手動バックアップ用)
 │   ├── settle.py                     # 決済 CLI (コアは src/settlement/)
 │   ├── schedule_trades.py            # 試合別スケジューラー CLI (主エントリ)
-│   ├── cron_schedule.sh              # スケジューラー cron ラッパー (5分間隔)
+│   ├── cron_schedule.sh              # スケジューラー cron ラッパー (15分間隔, 24/7, caffeinate 付き)
 │   ├── cron_scan.sh                  # 旧 cron ラッパー (無効化済み・手動用)
 │   ├── check_balance.py              # API 接続確認
 │   ├── survey_liquidity.py           # NBA マーケット流動性調査
@@ -144,7 +144,7 @@ nbabot/
 ### Per-game スケジューラー (主戦略)
 
 ```
-cron (2分ごと)
+cron (15分間隔, 24/7)
      │
      ▼
 scripts/schedule_trades.py
@@ -348,7 +348,7 @@ Gamma Events API ──→ MoneylineMarket[] ──────────┤
 - `scanner.py` (bookmaker 乖離) はレガシーモードとして温存。削除しない。
 - Auto-settle は NBA.com スコア (本日分) + Polymarket Gamma API (過去分) の二段構え。
 - `scan.py` / `cron_scan.sh` は手動バックアップ用に温存。主エントリは `schedule_trades.py`。
-- スケジューラーは cron (5分間隔) + SQLite ジョブキュー。デーモンではない。
+- スケジューラーは cron (15分間隔, 24/7) + SQLite ジョブキュー。デーモンではない。"Dumb scheduler, smart worker" パターン: cron はハートビート、スクリプト内で today+tomorrow (ET) を探索し実行窓内ジョブのみ処理。窓外は ~3秒で終了。caffeinate -i で macOS スリープ防止。
 - 二重発注防止は 5 層: flock → executing ロック → UNIQUE(event_slug, job_side) 制約 → signals 重複チェック → LIMIT 注文。
 - `trade_jobs` テーブルのステートマシン: `pending → executing → executed/skipped/failed/expired` + DCA: `executing → dca_active → executed`。
 - Both-side: directional ジョブ処理後に hedge ジョブを pending で作成。hedge は独立 DCA グループで TWAP 実行。combined VWAP ガードで利鞘なし取引を排除。

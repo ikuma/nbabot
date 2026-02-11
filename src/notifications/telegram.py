@@ -14,14 +14,19 @@ TELEGRAM_API = "https://api.telegram.org/bot{token}/sendMessage"
 
 
 def send_message(text: str, parse_mode: str = "Markdown") -> bool:
-    """Send a message via Telegram bot API. Returns True on success."""
+    """Send a message via Telegram bot API. Returns True on success.
+
+    Falls back to plain text if Markdown parsing fails (HTTP 400).
+    """
     if not settings.telegram_bot_token or not settings.telegram_chat_id:
         logger.warning("Telegram not configured, skipping notification")
         return False
 
+    url = TELEGRAM_API.format(token=settings.telegram_bot_token)
+
     try:
         resp = httpx.post(
-            TELEGRAM_API.format(token=settings.telegram_bot_token),
+            url,
             json={
                 "chat_id": settings.telegram_chat_id,
                 "text": text,
@@ -32,6 +37,23 @@ def send_message(text: str, parse_mode: str = "Markdown") -> bool:
         resp.raise_for_status()
         return True
     except httpx.HTTPStatusError as e:
+        if e.response.status_code == 400 and parse_mode:
+            # Markdown パースエラー → plain text でリトライ
+            logger.warning("Telegram Markdown parse failed, retrying as plain text")
+            try:
+                resp2 = httpx.post(
+                    url,
+                    json={
+                        "chat_id": settings.telegram_chat_id,
+                        "text": text,
+                    },
+                    timeout=10,
+                )
+                resp2.raise_for_status()
+                return True
+            except Exception:
+                logger.exception("Telegram plain text fallback also failed")
+                return False
         logger.error("Telegram HTTP error %d: %s", e.response.status_code, e)
         return False
     except httpx.TimeoutException:
