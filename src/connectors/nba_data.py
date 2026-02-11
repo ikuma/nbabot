@@ -19,6 +19,7 @@ from src.connectors.team_mapping import NBA_TEAMS, normalize_team_name
 logger = logging.getLogger(__name__)
 
 ESPN_BASE = "https://site.api.espn.com/apis/site/v2/sports/basketball/nba"
+ESPN_STANDINGS_URL = "https://site.api.espn.com/apis/v2/sports/basketball/nba/standings"
 _CACHE_TTL_STANDINGS = 6 * 3600  # 6h
 _CACHE_TTL_INJURIES = 3 * 3600  # 3h
 
@@ -78,7 +79,7 @@ def _fetch_standings() -> dict[str, dict]:
     if _is_cache_valid(_standings_cache, _CACHE_TTL_STANDINGS):
         return _standings_cache[0]  # type: ignore[index]
 
-    url = f"{ESPN_BASE}/standings"
+    url = ESPN_STANDINGS_URL
     result: dict[str, dict] = {}
     try:
         resp = httpx.get(url, timeout=15)
@@ -137,8 +138,11 @@ def _fetch_injuries() -> dict[str, list[str]]:
         data = resp.json()
 
         for team_entry in data.get("injuries", []):
-            team_info = team_entry.get("team", {})
-            team_name = team_info.get("displayName", "")
+            # ESPN API 形式: team_entry.displayName (新) or team_entry.team.displayName (旧)
+            team_name = team_entry.get("displayName", "")
+            if not team_name:
+                team_info = team_entry.get("team", {})
+                team_name = team_info.get("displayName", "")
             team_name = normalize_team_name(team_name)
             injuries_list: list[str] = []
 
