@@ -3,18 +3,20 @@
 from __future__ import annotations
 
 import json
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 from src.connectors.nba_data import GameContext, TeamContext
 from src.strategy.llm_analyzer import (
     GameAnalysis,
+    _call_llm,
     _extract_json,
     _parse_synthesis,
     analyze_game,
     determine_directional,
 )
+from src.strategy.prompts.game_analysis import SHARED_KNOWLEDGE_BASE
 
 
 def _make_team(name: str = "Boston Celtics", **kwargs) -> TeamContext:
@@ -372,6 +374,86 @@ class TestLlmCache:
         )
         assert result is not None
         assert result.favored_team == "Boston Celtics"
+
+
+# ---------------------------------------------------------------------------
+# Prompt caching (Phase L-cache)
+# ---------------------------------------------------------------------------
+
+
+class TestPromptCaching:
+    def test_shared_knowledge_base_length(self):
+        """SHARED_KNOWLEDGE_BASE must be >= 4096 tokens for Opus 4.6 caching."""
+        # Conservative estimate: 1 token ≈ 4 chars for English text.
+        # Actual Anthropic tokenizer gives ~3.4 chars/token, so char/4 is
+        # a safe lower bound. Minimum for Opus 4.6/4.5 is 4096 tokens.
+        estimated_tokens = len(SHARED_KNOWLEDGE_BASE) / 4
+        assert estimated_tokens >= 3500, (
+            f"SHARED_KNOWLEDGE_BASE may be too short for Opus 4.6 caching: "
+            f"~{estimated_tokens:.0f} tokens estimated (need >= 4096 actual)"
+        )
+
+    def test_shared_knowledge_base_no_calibration_leak(self):
+        """Knowledge base must NOT contain calibration table or sizing parameters."""
+        text_lower = SHARED_KNOWLEDGE_BASE.lower()
+        for forbidden in ["calibration table", "sweet_spot", "kelly_fraction", "0.25 kelly"]:
+            assert forbidden not in text_lower, (
+                f"SHARED_KNOWLEDGE_BASE contains forbidden term: {forbidden}"
+            )
+
+    @pytest.mark.asyncio
+    async def test_call_llm_uses_structured_system(self, monkeypatch):
+        """_call_llm sends system as list of blocks with cache_control."""
+        monkeypatch.setattr(
+            "src.strategy.llm_analyzer.settings.anthropic_api_key", "test-key"
+        )
+        monkeypatch.setattr(
+            "src.strategy.llm_analyzer.settings.llm_model", "claude-haiku-4-5-20251001"
+        )
+        monkeypatch.setattr(
+            "src.strategy.llm_analyzer.settings.llm_timeout_sec", 30
+        )
+
+        # Mock the Anthropic client
+        mock_response = MagicMock()
+        mock_response.content = [MagicMock(text='{"result": "ok"}')]
+        mock_response.usage = MagicMock(
+            input_tokens=100,
+            cache_read_input_tokens=80,
+            cache_creation_input_tokens=0,
+        )
+
+        mock_create = AsyncMock(return_value=mock_response)
+
+        mock_client = MagicMock()
+        mock_client.messages.create = mock_create
+
+        def mock_async_anthropic(**kwargs):
+            return mock_client
+
+        monkeypatch.setattr(
+            "anthropic.AsyncAnthropic", mock_async_anthropic
+        )
+
+        result = await _call_llm("persona instructions", "user question")
+
+        assert result == '{"result": "ok"}'
+
+        # Verify structured system message
+        call_kwargs = mock_create.call_args.kwargs
+        system_blocks = call_kwargs["system"]
+        assert isinstance(system_blocks, list)
+        assert len(system_blocks) == 2
+
+        # First block: shared knowledge base with cache_control
+        assert system_blocks[0]["type"] == "text"
+        assert system_blocks[0]["text"] == SHARED_KNOWLEDGE_BASE
+        assert system_blocks[0]["cache_control"] == {"type": "ephemeral"}
+
+        # Second block: persona-specific instructions (no cache_control)
+        assert system_blocks[1]["type"] == "text"
+        assert system_blocks[1]["text"] == "persona instructions"
+        assert "cache_control" not in system_blocks[1]
 
 
 # ---------------------------------------------------------------------------

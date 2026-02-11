@@ -24,6 +24,7 @@ from src.strategy.prompts.game_analysis import (
     QUANT_TRADER_USER,
     RISK_MANAGER_SYSTEM,
     RISK_MANAGER_USER,
+    SHARED_KNOWLEDGE_BASE,
     SYNTHESIS_SYSTEM,
     SYNTHESIS_USER,
     format_game_context,
@@ -59,7 +60,12 @@ async def _call_llm(
     model: str | None = None,
     timeout: int | None = None,
 ) -> str:
-    """Call Anthropic API with given prompts. Returns raw text response."""
+    """Call Anthropic API with given prompts. Returns raw text response.
+
+    Uses structured system messages with prompt caching: the shared
+    knowledge base (>1024 tokens) is marked with cache_control so it
+    is cached across calls within the same 5-minute TTL window.
+    """
     import anthropic
 
     model = model or settings.llm_model
@@ -70,12 +76,37 @@ async def _call_llm(
         timeout=float(timeout_sec),
     )
 
+    # 構造化システムメッセージ: ナレッジベース (cached) + ペルソナ固有指示
+    system_blocks = [
+        {
+            "type": "text",
+            "text": SHARED_KNOWLEDGE_BASE,
+            "cache_control": {"type": "ephemeral"},
+        },
+        {
+            "type": "text",
+            "text": system_prompt,
+        },
+    ]
+
     response = await client.messages.create(
         model=model,
         max_tokens=1024,
-        system=system_prompt,
+        system=system_blocks,
         messages=[{"role": "user", "content": user_prompt}],
     )
+
+    # キャッシュ使用状況ログ
+    usage = response.usage
+    cache_read = getattr(usage, "cache_read_input_tokens", 0)
+    cache_create = getattr(usage, "cache_creation_input_tokens", 0)
+    if cache_read or cache_create:
+        logger.debug(
+            "LLM cache: read=%d create=%d input=%d",
+            cache_read,
+            cache_create,
+            usage.input_tokens,
+        )
 
     return response.content[0].text
 
