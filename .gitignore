@@ -5,6 +5,7 @@ dist/
 .venv/
 .env
 *.db
+*.db.bak*
 data/reports/*.md
 data/reports/*/
 data/traders/
