@@ -27,7 +27,6 @@ logger = logging.getLogger(__name__)
 def _schedule_hedge_job(
     directional_job: TradeJob,
     bothside_opp,
-    directional_dca_group_id: str,
     db_path: str,
 ) -> None:
     """Create a pending hedge job for the opposite outcome."""

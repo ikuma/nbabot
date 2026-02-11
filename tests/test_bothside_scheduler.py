@@ -93,7 +93,7 @@ class TestScheduleHedgeJob:
         with patch("src.scheduler.hedge_executor.settings") as mock_settings:
             mock_settings.bothside_hedge_delay_min = 30
 
-            _schedule_hedge_job(dir_job, bothside, "dca-grp-1", str(db_path))
+            _schedule_hedge_job(dir_job, bothside, str(db_path))
 
         hedge = get_hedge_job_for_slug("nba-nyk-bos-2026-02-10", db_path=db_path)
         assert hedge is not None
@@ -132,7 +132,7 @@ class TestScheduleHedgeJob:
         with patch("src.scheduler.hedge_executor.settings") as mock_settings:
             mock_settings.bothside_hedge_delay_min = 60  # 60 min delay
 
-            _schedule_hedge_job(dir_job, bothside, "dca-grp-1", str(db_path))
+            _schedule_hedge_job(dir_job, bothside, str(db_path))
 
         hedge = get_hedge_job_for_slug("nba-nyk-bos-2026-02-10", db_path=db_path)
         assert hedge is not None
@@ -169,7 +169,7 @@ class TestHedgeIndependentDca:
         with patch("src.scheduler.hedge_executor.settings") as mock_settings:
             mock_settings.bothside_hedge_delay_min = 30
 
-            _schedule_hedge_job(dir_job, bothside, "dca-grp-dir", str(db_path))
+            _schedule_hedge_job(dir_job, bothside, str(db_path))
 
         hedge = get_hedge_job_for_slug("nba-nyk-bos-2026-02-10", db_path=db_path)
         assert hedge is not None

@@ -38,6 +38,7 @@ Polymarket NBA キャリブレーション Bot。Polymarket の構造的ミス�
 | R | コードベースリファクタリング (500行分割) | **完了** |
 | D | リスク管理 + インフラ強化 (CB, ドリフト, WAL, ログ) | **完了** |
 | B3 | POLY_PROXY (Gnosis Safe) MERGE 対応 | **完了** |
+| F1 | Bothside + MERGE デフォルト有効化 | **完了** |
 | C | Total (O/U) マーケット校正 | 未着手 |
 | E | スケール + 本番運用 ($30-50K) | 未着手 |
 
@@ -294,12 +295,12 @@ Gamma Events API ──→ MoneylineMarket[] ──────────┤
 | `DCA_MIN_PRICE_DIP_PCT` | No | VWAP から N%+ 下落でボーナス購入 (default: 3.0) |
 | `DCA_MAX_PRICE_SPREAD` | No | 初回→最新の最大価格差 (default: 0.15, 超えたら DCA 停止) |
 | `DCA_MIN_INTERVAL_MIN` | No | DCA 最小間隔 (分, default: 30) |
-| `BOTHSIDE_ENABLED` | No | 両サイドベット有効/無効 (default: false) |
+| `BOTHSIDE_ENABLED` | No | 両サイドベット有効/無効 (default: true) |
 | `BOTHSIDE_MAX_COMBINED_VWAP` | No | combined VWAP 上限 (default: 0.995, 超えたら hedge しない) |
 | `BOTHSIDE_HEDGE_KELLY_MULT` | No | hedge 側 Kelly 乗数 (default: 0.5) |
 | `BOTHSIDE_HEDGE_DELAY_MIN` | No | directional→hedge 最小遅延 (分, default: 30) |
 | `BOTHSIDE_HEDGE_MAX_PRICE` | No | hedge 価格上限 (default: 0.55) |
-| `MERGE_ENABLED` | No | MERGE 有効/無効 (default: false, BOTHSIDE_ENABLED とは独立) |
+| `MERGE_ENABLED` | No | MERGE 有効/無効 (default: true, BOTHSIDE_ENABLED とは独立) |
 | `MERGE_MAX_COMBINED_VWAP` | No | MERGE 判定 combined VWAP 上限 (default: 0.998) |
 | `MERGE_MIN_PROFIT_USD` | No | MERGE 最低利益 (default: 0.10, gas 負け防止) |
 | `MERGE_GAS_BUFFER_GWEI` | No | gas price 上限 gwei (default: 50) |
@@ -342,7 +343,8 @@ Gamma Events API ──→ MoneylineMarket[] ──────────┤
 - `data/reports/*.md` は `.gitignore` 対象。
 - Polymarket は地域制限あり。日本からは `HTTP_PROXY` が必要な場合がある。
 - Odds API は **calibration モードでは不要**。NBA.com スコアボードでゲーム発見。bookmaker モードのみ使用。
-- 校正スキャナーは BUY シグナルのみ。`BOTHSIDE_ENABLED=false` 時は 1 試合 1 シグナル (高 EV 側)。`true` 時は両サイド購入可能。
+- 校正スキャナーは BUY シグナルのみ。`BOTHSIDE_ENABLED=false` 時は 1 試合 1 シグナル (高 EV 側)。`true` (デフォルト) 時は両サイド購入可能。
+- bothside + MERGE はデフォルト有効。sovereign2013 の利益の 46.5% が MERGE で、本システムの利益の核心。`BOTHSIDE_ENABLED=false` の状態は設計意図に反する。
 - Kelly criterion の分数 (default 0.25) でポジションサイジング。フル Kelly は使わない。
 - スイートスポット (0.20-0.55) 内はフル Kelly、外は 0.5x Kelly。
 - `scanner.py` (bookmaker 乖離) はレガシーモードとして温存。削除しない。

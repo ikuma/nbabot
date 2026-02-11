@@ -251,7 +251,7 @@ def process_eligible_jobs(
 
             # bothside: hedge ジョブをスケジュール
             if bothside_opp and bothside_opp.hedge is not None:
-                _schedule_hedge_job(job, bothside_opp, "", path)
+                _schedule_hedge_job(job, bothside_opp, path)
 
         results.append(result)
         if result.status == "executed":

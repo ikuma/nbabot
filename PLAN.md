@@ -176,6 +176,18 @@ Phase B2 MERGE は EOA のみだったが、POLY_PROXY (1-of-1 Gnosis Safe) ウ�
 
 ---
 
+### Phase F1: Bothside + MERGE デフォルト有効化 — **完了**
+2/10 の 4 試合全敗 (-$450, DD 35%) を受け、`BOTHSIDE_ENABLED` と `MERGE_ENABLED` のデフォルトを `True` に変更。
+sovereign2013 の利益の 46.5% が MERGE であり、bothside + MERGE がこのシステムの利益の核心。設定忘れ防止のためデフォルト有効化。
+
+実装内容:
+- `src/config.py`: `bothside_enabled` と `merge_enabled` のデフォルトを `True` に変更
+- `src/scheduler/hedge_executor.py`: `_schedule_hedge_job()` から未使用引数 `directional_dca_group_id` を削除
+- `src/scheduler/trade_scheduler.py`: 呼び出し側の空文字列引数を削除
+- `.env.example`: デフォルト値を `true` に更新
+
+---
+
 ## 今後のフェーズ (未着手)
 
 ### Phase C: Total (Over/Under) マーケット対応
