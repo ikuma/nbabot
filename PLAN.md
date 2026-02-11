@@ -213,6 +213,24 @@ LLM (Anthropic Claude) が試合の方向性を判断し、校正テーブルで
 
 ---
 
+### Phase W: launchd 移行 + 死活監視 — **完了**
+
+crontab (15分間隔) から macOS ネイティブの launchd に移行。スリープ復帰後の実行保証を強化。
+
+**実装内容:**
+- `launchd/com.nbabot.scheduler.plist`: `StartInterval: 900` (15分) — スリープ復帰時に launchd が自動で 1 回実行
+- `launchd/com.nbabot.watchdog.plist`: `StartInterval: 600` (10分) — 独立した死活監視ジョブ
+- `scripts/watchdog.py`: `data/heartbeat` の mtime を監視、35分超過で Telegram アラート、復旧通知付き
+- `scripts/install_launchd.sh`: 冪等インストーラー (bootout → コピー → bootstrap → crontab クリーンアップ)
+- `schedule_trades.py`: main() 末尾にハートビート書き出し (3行追加)
+
+**設計判断:**
+- `cron_schedule.sh` をそのまま launchd から呼ぶ (ロック・caffeinate・ログローテーションは既存のまま)
+- watchdog は DB アクセスなし (ファイル mtime のみ) → SQLite ロック競合ゼロ
+- アラートフラグファイル (`data/.watchdog_alerted`) で連続送信防止
+
+---
+
 ## 今後のフェーズ (未着手)
 
 ### Phase C: Total (Over/Under) マーケット対応

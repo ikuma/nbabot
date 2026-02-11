@@ -40,6 +40,7 @@ Polymarket NBA キャリブレーション Bot。Polymarket の構造的ミス�
 | B3 | POLY_PROXY (Gnosis Safe) MERGE 対応 | **完了** |
 | F1 | Bothside + MERGE デフォルト有効化 | **完了** |
 | L | LLM ベース試合分析 (3 ペルソナ + シンセシス) | **完了** |
+| W | launchd 移行 + 死活監視 (watchdog) | **完了** |
 | C | Total (O/U) マーケット校正 | 未着手 |
 | E | スケール + 本番運用 ($30-50K) | 未着手 |
 
@@ -100,7 +101,9 @@ nbabot/
 │   ├── scan.py                       # 日次エッジスキャン (手動バックアップ用)
 │   ├── settle.py                     # 決済 CLI (コアは src/settlement/)
 │   ├── schedule_trades.py            # 試合別スケジューラー CLI (主エントリ)
-│   ├── cron_schedule.sh              # スケジューラー cron ラッパー (15分間隔, 24/7, caffeinate 付き)
+│   ├── cron_schedule.sh              # スケジューラー launchd ラッパー (15分間隔, 24/7, caffeinate 付き)
+│   ├── watchdog.py                   # 死活監視 (heartbeat mtime チェック → Telegram アラート)
+│   ├── install_launchd.sh            # launchd ジョブ冪等インストーラー
 │   ├── cron_scan.sh                  # 旧 cron ラッパー (無効化済み・手動用)
 │   ├── check_balance.py              # API 接続確認
 │   ├── survey_liquidity.py           # NBA マーケット流動性調査
@@ -108,6 +111,9 @@ nbabot/
 │   ├── fetch_trader.py               # 任意トレーダーの取引データ取得
 │   ├── analyze_trader.py             # P&L + 戦略プロファイル分析
 │   └── compare_traders.py            # 複数トレーダー比較レポート
+├── launchd/
+│   ├── com.nbabot.scheduler.plist    # launchd 定期実行 (15分, スリープ復帰対応)
+│   └── com.nbabot.watchdog.plist     # launchd 死活監視 (10分)
 ├── agents/                           # エージェントプロンプト
 ├── data/reports/                     # 日次レポート出力先 (.gitignore 対象)
 ├── data/logs/                        # スケジューラーログ (.gitignore 対象)
@@ -122,7 +128,9 @@ nbabot/
 
 - **Python**: 3.11+ 必須
 - **依存インストール**: `pip install -e .` (venv 推奨)
-- **スケジューラー (主)**: `python scripts/schedule_trades.py` (5分 cron で自動実行)
+- **スケジューラー (主)**: `python scripts/schedule_trades.py` (launchd 15分間隔で自動実行)
+- **launchd セットアップ**: `bash scripts/install_launchd.sh`
+- **死活監視**: `python scripts/watchdog.py` (launchd 10分間隔で自動実行)
 - **スケジューラー dry-run**: `python scripts/schedule_trades.py --execution dry-run`
 - **未来日付テスト**: `python scripts/schedule_trades.py --date 2026-02-10 --execution dry-run`
 - **手動スキャン (バックアップ)**: `python scripts/scan.py` (デフォルト: calibration モード)
@@ -366,7 +374,9 @@ Gamma Events API ──→ MoneylineMarket[] ──────────┤
 - `scanner.py` (bookmaker 乖離) はレガシーモードとして温存。削除しない。
 - Auto-settle は NBA.com スコア (本日分) + Polymarket Gamma API (過去分) の二段構え。
 - `scan.py` / `cron_scan.sh` は手動バックアップ用に温存。主エントリは `schedule_trades.py`。
-- スケジューラーは cron (15分間隔, 24/7) + SQLite ジョブキュー。デーモンではない。"Dumb scheduler, smart worker" パターン: cron はハートビート、スクリプト内で today+tomorrow (ET) を探索し実行窓内ジョブのみ処理。窓外は ~3秒で終了。caffeinate -i で macOS スリープ防止。
+- スケジューラーは launchd (15分間隔, 24/7) + SQLite ジョブキュー。デーモンではない (`StartInterval` 定期実行)。"Dumb scheduler, smart worker" パターン: launchd はハートビート、スクリプト内で today+tomorrow (ET) を探索し実行窓内ジョブのみ処理。窓外は ~3秒で終了。caffeinate -i で macOS スリープ防止。launchd はスリープ復帰後に自動で 1 回実行してくれる (cron にはない利点)。
+- 死活監視 (watchdog): スケジューラーとは独立した launchd ジョブ (10分間隔)。`data/heartbeat` の mtime を監視し、35分超過で Telegram アラート。`data/.watchdog_alerted` フラグで連続送信防止、復旧時に自動クリア+復旧通知。DB アクセスなし (ファイル mtime のみ)。
+- launchd インストール: `bash scripts/install_launchd.sh` で冪等にセットアップ。`~/Library/LaunchAgents/` に plist コピー → `launchctl bootstrap` でロード → 旧 crontab エントリ削除。
 - 二重発注防止は 5 層: flock → executing ロック → UNIQUE(event_slug, job_side) 制約 → signals 重複チェック → LIMIT 注文。
 - `trade_jobs` テーブルのステートマシン: `pending → executing → executed/skipped/failed/expired` + DCA: `executing → dca_active → executed`。
 - Both-side: directional ジョブ処理後に hedge ジョブを pending で作成。hedge は独立 DCA グループで TWAP 実行。combined VWAP ガードで利鞘なし取引を排除。

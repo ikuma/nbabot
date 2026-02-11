@@ -1,5 +1,5 @@
 #!/bin/bash
-# Per-game trade scheduler — called by crontab every 15 minutes, 24/7.
+# Per-game trade scheduler — called by launchd every 15 minutes, 24/7.
 #
 # Best practice: "dumb scheduler, smart worker"
 # - cron は単純なハートビートとして常時実行

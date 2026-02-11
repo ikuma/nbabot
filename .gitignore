@@ -11,3 +11,5 @@ data/traders/
 data/logs/
 .ruff_cache/
 .pytest_cache/
+data/heartbeat
+data/.watchdog_alerted

@@ -258,6 +258,10 @@ def main() -> None:
     except Exception:
         log.exception("Telegram notification failed")
 
+    # Heartbeat (watchdog 死活監視用)
+    heartbeat = Path(__file__).resolve().parent.parent / "data" / "heartbeat"
+    heartbeat.write_text(datetime.now(timezone.utc).isoformat() + "\n")
+
     # サマリー出力
     print(f"\n{'=' * 50}")
     print(f"  Scheduler tick: {game_date} [{execution_mode}]")
