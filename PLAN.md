@@ -262,6 +262,24 @@ Phase L の LLM 分析を実戦投入可能な発注戦略に統合。3 つの�
 
 ---
 
+### Phase L-cache: LLM プロンプトキャッシング — **完了**
+
+3 ペルソナ並列呼び出しで共通のナレッジベース (~4K+ tokens) を Anthropic Prompt Caching でキャッシュし、2 回目以降の呼び出しでトークン消費を ~60% 削減。
+
+**実装内容:**
+- `src/strategy/prompts/game_analysis.py`: `SHARED_KNOWLEDGE_BASE` 定数追加 — NBA 統計予測因子、予測市場バイアス、確率推定ガイドライン、分析プロトコルの 4 セクション構成
+- `src/strategy/llm_analyzer.py`: `_call_llm()` を構造化システムメッセージに変更 — `cache_control: {"type": "ephemeral"}` 付きナレッジベースブロック + ペルソナ固有指示ブロック
+- キャッシュ使用状況の debug ログ (`cache_read`, `cache_creation`, `input_tokens`)
+- `tests/test_llm_analyzer.py`: `TestPromptCaching` クラス — トークン長検証、機密情報リーク防止、構造化システムメッセージ検証
+
+**設計判断:**
+- ナレッジベースは 4096+ tokens (Opus 4.6/4.5/Haiku 4.5 の最小キャッシュ閾値)
+- 校正テーブル・Kelly 分数などの戦略パラメータは含めない (LLM への情報漏洩防止)
+- 5 分 TTL で同一試合の 3 ペルソナ + シンセシス呼び出しをカバー
+- コスト削減: Opus 4.6 で ~$72/月 → ~$30/月 (ナレッジベース分のキャッシュヒット)
+
+---
+
 ## 今後のフェーズ (未着手)
 
 ### Phase C: Total (Over/Under) マーケット対応
@@ -358,7 +376,7 @@ Phase L の LLM 分析を実戦投入可能な発注戦略に統合。3 つの�
 - **ゲーム発見**: NBA.com Scoreboard API (Odds API は bookmaker モードのみ)
 - **DB**: SQLite (`data/paper_trades.db`)
 - **通知**: Telegram Bot API
-- **CI**: pytest (401 tests) + ruff
+- **CI**: pytest (458 tests) + ruff
 
 ---
 
