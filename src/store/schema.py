@@ -273,6 +273,33 @@ def _ensure_merge_columns(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+LLM_ANALYSES_SQL = """
+CREATE TABLE IF NOT EXISTS llm_analyses (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    event_slug      TEXT NOT NULL UNIQUE,
+    game_date       TEXT NOT NULL,
+    favored_team    TEXT NOT NULL,
+    confidence      REAL NOT NULL,
+    home_win_prob   REAL NOT NULL,
+    away_win_prob   REAL NOT NULL,
+    sizing_modifier REAL NOT NULL DEFAULT 1.0,
+    hedge_ratio     REAL NOT NULL DEFAULT 0.5,
+    risk_flags      TEXT DEFAULT '[]',
+    reasoning       TEXT,
+    expert_analyses TEXT DEFAULT '{}',
+    model_id        TEXT NOT NULL,
+    latency_ms      INTEGER,
+    created_at      TEXT NOT NULL
+);
+"""
+
+
+def _ensure_llm_analyses_table(conn: sqlite3.Connection) -> None:
+    """Create llm_analyses table if it doesn't exist."""
+    conn.executescript(LLM_ANALYSES_SQL)
+    conn.commit()
+
+
 RISK_TABLES_SQL = """
 CREATE TABLE IF NOT EXISTS circuit_breaker_events (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -339,5 +366,6 @@ def _connect(db_path: Path | str = DEFAULT_DB_PATH) -> sqlite3.Connection:
     _ensure_bothside_columns(conn)
     _ensure_merge_columns(conn)
     _ensure_risk_tables(conn)
+    _ensure_llm_analyses_table(conn)
     _ensure_indexes(conn)
     return conn

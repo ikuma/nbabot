@@ -145,6 +145,57 @@ def process_single_job(
             except Exception:
                 logger.warning("Balance fetch failed for %s", job.event_slug)
 
+        # --- LLM 分析 (Phase L): 校正スキャンの前に実行 ---
+        llm_analysis = None
+        effective_sizing = sizing_multiplier
+        effective_hedge_mult = settings.bothside_hedge_kelly_mult
+
+        if settings.llm_analysis_enabled and job.job_side == "directional":
+            try:
+                from src.connectors.nba_data import build_game_context
+                from src.connectors.team_mapping import get_team_short_name
+                from src.strategy.llm_cache import get_or_analyze
+
+                # ml.outcomes の順序は API 依存 — チーム名マッチで home/away を特定
+                home_short = get_team_short_name(job.home_team) or ""
+                poly_home_price = 0.0
+                poly_away_price = 0.0
+                for i, outcome in enumerate(ml.outcomes):
+                    if i >= len(ml.prices):
+                        break
+                    if outcome == home_short:
+                        poly_home_price = ml.prices[i]
+                    else:
+                        poly_away_price = ml.prices[i]
+
+                ctx = build_game_context(
+                    home_team=job.home_team,
+                    away_team=job.away_team,
+                    game_date=job.game_date,
+                    game_time_utc=job.game_time_utc,
+                    poly_home_price=poly_home_price,
+                    poly_away_price=poly_away_price,
+                )
+                llm_analysis = get_or_analyze(
+                    job.event_slug, job.game_date, ctx, db_path=db_path
+                )
+                if llm_analysis:
+                    effective_sizing = sizing_multiplier * max(
+                        settings.llm_min_sizing_modifier,
+                        min(settings.llm_max_sizing_modifier, llm_analysis.sizing_modifier),
+                    )
+                    effective_hedge_mult = max(0.3, min(0.8, llm_analysis.hedge_ratio))
+                    logger.info(
+                        "LLM analysis for %s: favored=%s conf=%.2f sizing=%.2f hedge=%.2f",
+                        job.event_slug,
+                        llm_analysis.favored_team,
+                        llm_analysis.confidence,
+                        effective_sizing,
+                        effective_hedge_mult,
+                    )
+            except Exception:
+                logger.warning("LLM analysis failed for %s, falling back", job.event_slug)
+
         # EV 判定 (bothside 有効時は両サイド同時評価)
         if settings.bothside_enabled and job.job_side == "directional":
             from src.strategy.calibration_scanner import scan_calibration_bothside
@@ -162,6 +213,45 @@ def process_single_job(
                 opp = bothside_opp.directional
             else:
                 opp = None
+
+            # --- LLM-First: directional を LLM が決定 ---
+            if llm_analysis and bothside_opp and opp:
+                from src.strategy.llm_analyzer import determine_directional
+
+                # LLM の favored_team と校正スキャナーの directional を比較
+                # home_short は上の LLM ブロックで算出済み
+                _home_outcome = ""
+                _away_outcome = ""
+                for _oc in ml.outcomes:
+                    if _oc == home_short:
+                        _home_outcome = _oc
+                    else:
+                        _away_outcome = _oc
+
+                dir_name, hedge_name = determine_directional(
+                    llm_analysis,
+                    _home_outcome,
+                    _away_outcome,
+                )
+                # LLM が校正スキャナーと違う側を推奨した場合、入れ替え
+                if (
+                    bothside_opp.hedge
+                    and opp.outcome_name != dir_name
+                    and bothside_opp.hedge.outcome_name == dir_name
+                ):
+                    logger.info(
+                        "LLM override: %s -> %s (LLM favored=%s)",
+                        opp.outcome_name,
+                        dir_name,
+                        llm_analysis.favored_team,
+                    )
+                    opp = bothside_opp.hedge
+                    bothside_opp = type(bothside_opp)(
+                        directional=opp,
+                        hedge=bothside_opp.directional,
+                        combined_price=bothside_opp.combined_price,
+                        hedge_position_usd=bothside_opp.hedge_position_usd,
+                    )
         else:
             opps = scan_calibration([ml], balance_usd=balance_usd, liquidity_map=liquidity_map)
             opp = opps[0] if opps else None
@@ -190,7 +280,7 @@ def process_single_job(
             capital_risk_pct=settings.capital_risk_pct,
             liquidity_fill_pct=settings.liquidity_fill_pct,
             max_spread_pct=settings.max_spread_pct,
-            sizing_multiplier=sizing_multiplier,
+            sizing_multiplier=effective_sizing,
         )
 
         if budget.slice_size_usd <= 0:

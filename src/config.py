@@ -89,6 +89,14 @@ class Settings(BaseSettings):
     bothside_hedge_delay_min: int = 30  # directional 発注→ hedge 最小遅延 (分)
     bothside_hedge_max_price: float = 0.55  # hedge 価格上限 (sweet spot 上限と同値)
 
+    # === LLM Game Analysis (Phase L) ===
+    llm_analysis_enabled: bool = False  # フィーチャーフラグ (デフォルト OFF)
+    anthropic_api_key: str = ""  # Anthropic API キー
+    llm_model: str = "claude-opus-4-6"  # デフォルト: Opus 4.6 (最高品質)
+    llm_timeout_sec: int = 30  # 各ペルソナ呼び出しタイムアウト (秒)
+    llm_max_sizing_modifier: float = 1.5  # sizing_modifier 上限
+    llm_min_sizing_modifier: float = 0.5  # sizing_modifier 下限
+
     # === MERGE (Phase B2) ===
     merge_enabled: bool = True  # MERGE はデフォルト有効 (BOTHSIDE とは独立)
     merge_max_combined_vwap: float = 0.998  # これ以上なら MERGE しない

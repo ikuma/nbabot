@@ -192,9 +192,22 @@ def process_hedge_job(
             )
             return JobResult(job.id, job.event_slug, "skipped")
 
-        # サイジング
+        # サイジング (LLM hedge_ratio 適用: Phase L)
         kelly = _calibration_kelly(band.expected_win_rate, hedge_price)
-        kelly *= settings.bothside_hedge_kelly_mult
+        hedge_mult = settings.bothside_hedge_kelly_mult
+        if settings.llm_analysis_enabled:
+            from src.strategy.llm_cache import get_cached_analysis
+
+            _llm = get_cached_analysis(job.event_slug, db_path=db_path)
+            if _llm:
+                hedge_mult = max(0.3, min(0.8, _llm.hedge_ratio))
+                logger.info(
+                    "Hedge job %d: LLM hedge_ratio=%.2f (was %.2f)",
+                    job.id,
+                    hedge_mult,
+                    settings.bothside_hedge_kelly_mult,
+                )
+        kelly *= hedge_mult
         kelly_usd = min(kelly * settings.max_position_usd * 10, settings.max_position_usd)
 
         dca_max = settings.dca_max_entries

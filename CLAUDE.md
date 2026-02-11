@@ -39,6 +39,7 @@ Polymarket NBA キャリブレーション Bot。Polymarket の構造的ミス�
 | D | リスク管理 + インフラ強化 (CB, ドリフト, WAL, ログ) | **完了** |
 | B3 | POLY_PROXY (Gnosis Safe) MERGE 対応 | **完了** |
 | F1 | Bothside + MERGE デフォルト有効化 | **完了** |
+| L | LLM ベース試合分析 (3 ペルソナ + シンセシス) | **完了** |
 | C | Total (O/U) マーケット校正 | 未着手 |
 | E | スケール + 本番運用 ($30-50K) | 未着手 |
 
@@ -51,6 +52,7 @@ nbabot/
 │   ├── connectors/
 │   │   ├── ctf.py                    # CTF コントラクト (mergePositions — Phase B2/B3)
 │   │   ├── safe_tx.py                # Gnosis Safe execTransaction ヘルパー (Phase B3)
+│   │   ├── nba_data.py               # ESPN チーム成績・怪我・B2B データ収集 (Phase L)
 │   │   ├── nba_schedule.py           # NBA.com スコアボード (ゲーム発見 + スコア取得)
 │   │   ├── odds_api.py               # The Odds API (レガシー — bookmaker モード用)
 │   │   ├── polymarket.py             # Polymarket Gamma/CLOB API
@@ -60,6 +62,10 @@ nbabot/
 │   │   ├── calibration_scanner.py    # 校正ベーススキャナー (主戦略)
 │   │   ├── dca_strategy.py           # DCA 判定ロジック (時間/価格トリガー, VWAP 共通関数)
 │   │   ├── merge_strategy.py         # MERGE 判定純関数 (shares 計算, VWAP, ガード)
+│   │   ├── llm_analyzer.py          # 3 ペルソナ並列 LLM 分析 + シンセシス (Phase L)
+│   │   ├── llm_cache.py             # LLM 分析 SQLite キャッシュ (Phase L)
+│   │   ├── prompts/
+│   │   │   └── game_analysis.py     # 4 プロンプト定義 (3 ペルソナ + シンセシス)
 │   │   └── scanner.py               # ブックメーカー乖離スキャナー (レガシー)
 │   ├── notifications/
 │   │   └── telegram.py               # Telegram 通知
@@ -170,6 +176,10 @@ scripts/schedule_trades.py
      │   ├── job_side='directional':
      │   │     → Gamma API で最新価格取得
      │   │     → CLOB API で注文板取得 (流動性チェック有効時)
+     │   │     → [Phase L] LLM_ANALYSIS_ENABLED 時: build_game_context() → analyze_game()
+     │   │       3 ペルソナ並列 LLM 呼び出し → シンセシス → GameAnalysis
+     │   │       → LLM が directional (favored_team) を決定
+     │   │       → sizing_modifier, hedge_ratio を取得
      │   │     → BOTHSIDE_ENABLED 時: scan_calibration_bothside() で両サイド EV 判定
      │   │     → それ以外: scan_calibration() で EV 判定 (3層制約: Kelly×残高×流動性)
      │   │     → 正の EV なら発注 → dca_group_id 生成
@@ -316,6 +326,12 @@ Gamma Events API ──→ MoneylineMarket[] ──────────┤
 | `CALIBRATION_DRIFT_THRESHOLD` | No | 校正ドリフト検出閾値 σ (default: 2.0) |
 | `MAX_TOTAL_EXPOSURE_PCT` | No | 資金の最大同時リスク % (default: 30.0) |
 | `RISK_MAX_SINGLE_GAME_USD` | No | 1 試合あたり最大エクスポージャー (default: 200.0) |
+| `LLM_ANALYSIS_ENABLED` | No | LLM 試合分析有効/無効 (default: false) |
+| `ANTHROPIC_API_KEY` | LLM 時 | Anthropic API キー |
+| `LLM_MODEL` | No | LLM モデル ID (default: claude-opus-4-6) |
+| `LLM_TIMEOUT_SEC` | No | 各ペルソナ呼び出しタイムアウト秒 (default: 30) |
+| `LLM_MAX_SIZING_MODIFIER` | No | LLM sizing_modifier 上限 (default: 1.5) |
+| `LLM_MIN_SIZING_MODIFIER` | No | LLM sizing_modifier 下限 (default: 0.5) |
 
 ## セキュリティ
 
@@ -362,3 +378,6 @@ Gamma Events API ──→ MoneylineMarket[] ──────────┤
 - SQLite WAL モード有効。reader-writer 並行性向上 (手動 settle + cron の競合安全化)。
 - 構造化ログ: `STRUCTURED_LOGGING=true` で JSON 出力。TimedRotatingFileHandler (30 日保持)。
 - ヘルスチェック 3 階層: local (毎 tick — DB 接続 + ディスク), API (5 tick 毎 — NBA.com + Polymarket), integrity (日次 — PRAGMA integrity_check)。
+- LLM 試合分析 (Phase L): 3 ペルソナ (Polymarket 凄腕トレーダー, クオンツ, リスク管理) 並列呼び出し + シンセシス統合。LLM が directional (favored_team) を決定し、校正テーブルはサイジングのみ。`LLM_ANALYSIS_ENABLED=false` (デフォルト) で無効化。全 LLM 障害は従来パイプラインにフォールバック。
+- LLM 分析は `llm_analyses` テーブルに event_slug 単位でキャッシュ。DCA 後続・hedge は同一キャッシュを再利用。
+- LLM コスト: Opus 4.6 ($72/月), Sonnet 4.5 ($14/月), Haiku 4.5 ($5/月)。`LLM_MODEL` env で切替可能。

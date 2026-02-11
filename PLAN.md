@@ -188,6 +188,31 @@ sovereign2013 の利益の 46.5% が MERGE であり、bothside + MERGE がこ�
 
 ---
 
+### Phase L: LLM ベース試合分析 — **完了**
+LLM (Anthropic Claude) が試合の方向性を判断し、校正テーブルでベット金額を決める。
+
+**アーキテクチャ**: 方式 B (3 ペルソナ独立分析 + シンセシス統合)
+- Expert 1: Polymarket 凄腕トレーダー
+- Expert 2: ヘッジファンド天才クオンツ
+- Expert 3: リスク管理担当
+- シンセシス: 3 専門家の分析を統合し最終判断
+
+**実装内容**:
+- `src/connectors/nba_data.py`: ESPN API からチーム成績・怪我・B2B 情報を収集
+- `src/strategy/prompts/game_analysis.py`: 4 つのプロンプト定義 (3 ペルソナ + シンセシス)
+- `src/strategy/llm_analyzer.py`: `asyncio.gather()` で 3 ペルソナ並列呼び出し → シンセシス → `GameAnalysis`
+- `src/strategy/llm_cache.py`: SQLite キャッシュ (event_slug 単位、DCA/hedge で再利用)
+- `job_executor.py`: LLM-First directional 決定 + `sizing_modifier` 適用
+- `hedge_executor.py`: LLM の `hedge_ratio` を Kelly 乗数に適用
+
+**キーチェンジ**: 従来の `scan_calibration_bothside()` は「最高 EV 側を directional に選ぶ」だったが、新方式では **LLM が directional を決め**、校正テーブルはサイジングのみに使用。
+
+**フォールバック**: `LLM_ANALYSIS_ENABLED=false` (デフォルト) または API 障害時は従来パイプラインに自動フォールバック。
+
+**コスト**: Opus 4.6 で ~$72/月 (10 試合/日)。`LLM_MODEL` で Sonnet ($14/月) や Haiku ($5/月) に切替可能。
+
+---
+
 ## 今後のフェーズ (未着手)
 
 ### Phase C: Total (Over/Under) マーケット対応
