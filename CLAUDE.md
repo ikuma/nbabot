@@ -395,5 +395,5 @@ Gamma Events API ──→ MoneylineMarket[] ──────────┤
 - LLM コスト: Opus 4.6 ($72/月), Sonnet 4.5 ($14/月), Haiku 4.5 ($5/月)。`LLM_MODEL` env で切替可能。
 - LLM-First Directional (Phase L2): LLM が directional を決定、校正は EV 安全弁のみ。Case A (hedge 存在→swap)、Case B (hedge=None→`evaluate_single_outcome()` で LLM 側を独立評価)。LLM 側にバンドなし or EV 非正 → 校正維持。
 - Below-Market Limit Orders (Phase L2): 全注文を `best_ask - 0.01` で発注 (メイカー注文)。手数料優遇 + 合計 < 1.0 が自然に成立 → MERGE 利益。fill は保証されないが NBA 価格変動 (±2-5c/7.5h) で高確率。
-- Hedge Target Pricing (Phase L2): `max_hedge = min(hedge_max_price, target_combined - dir_vwap)` で上限を算出。`BOTHSIDE_TARGET_COMBINED` (default 0.97) で MERGE 利鞘 3%/share を確保。hedge は「フリーオプション」: fill しなくても directional だけで +EV。
+- Hedge Target Pricing (Phase L2): `max_hedge = target_combined - dir_vwap` で上限を算出。`BOTHSIDE_TARGET_COMBINED` (default 0.97) で MERGE 利鞘 3%/share を確保。`hedge_max_price` は旧 at-market 発注の名残で、below-market limit では `target_combined` に一本化。hedge は「フリーオプション」: fill しなくても directional だけで +EV。
 - hedge ジョブは常時作成 (bothside_opp の hedge=None でも)。実行時に注文板を取得し target-based pricing で発注可否を判定。

@@ -156,11 +156,8 @@ def process_hedge_job(
                 [s.fill_price or s.poly_price for s in dir_signals],
             )
 
-        # Target-based max hedge price
-        max_hedge_price = min(
-            settings.bothside_hedge_max_price,
-            settings.bothside_target_combined - dir_vwap,
-        )
+        # Target-based max hedge price (target_combined に一本化)
+        max_hedge_price = settings.bothside_target_combined - dir_vwap
         if max_hedge_price < 0.20:
             update_job_status(
                 job.id,

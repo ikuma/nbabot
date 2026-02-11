@@ -255,10 +255,9 @@ class TestHedgeTargetPricing:
         """dir_vwap=0.68, target=0.97 → max_hedge=0.29, best_ask=0.31 → order at 0.29."""
         dir_vwap = 0.68
         target_combined = 0.97
-        hedge_max_price = 0.55
         best_ask = 0.31
 
-        max_hedge_price = min(hedge_max_price, target_combined - dir_vwap)
+        max_hedge_price = target_combined - dir_vwap
         assert max_hedge_price == pytest.approx(0.29)
 
         order_price = max(best_ask - 0.01, 0.01)  # 0.30
@@ -269,23 +268,34 @@ class TestHedgeTargetPricing:
         """dir_vwap=0.68, target=0.97 → max_hedge=0.29, best_ask=0.25 → order at 0.24."""
         dir_vwap = 0.68
         target_combined = 0.97
-        hedge_max_price = 0.55
         best_ask = 0.25
 
-        max_hedge_price = min(hedge_max_price, target_combined - dir_vwap)
+        max_hedge_price = target_combined - dir_vwap
         assert max_hedge_price == pytest.approx(0.29)
 
         order_price = max(best_ask - 0.01, 0.01)  # 0.24
         order_price = min(order_price, max_hedge_price)  # 0.24 (below-market wins)
         assert order_price == pytest.approx(0.24)
 
+    def test_high_dir_vwap_still_allows_hedge(self):
+        """dir_vwap=0.30, target=0.97 → max_hedge=0.67, best_ask=0.71 → order at 0.67."""
+        dir_vwap = 0.30
+        target_combined = 0.97
+        best_ask = 0.71
+
+        max_hedge_price = target_combined - dir_vwap
+        assert max_hedge_price == pytest.approx(0.67)
+
+        order_price = max(best_ask - 0.01, 0.01)  # 0.70
+        order_price = min(order_price, max_hedge_price)  # 0.67
+        assert order_price == pytest.approx(0.67)
+
     def test_skip_when_max_hedge_below_band(self):
         """dir_vwap=0.80, target=0.97 → max_hedge=0.17 < 0.20 → should skip."""
         dir_vwap = 0.80
         target_combined = 0.97
-        hedge_max_price = 0.55
 
-        max_hedge_price = min(hedge_max_price, target_combined - dir_vwap)
+        max_hedge_price = target_combined - dir_vwap
         assert max_hedge_price == pytest.approx(0.17)
         assert max_hedge_price < 0.20  # 校正範囲外 → skip
 
