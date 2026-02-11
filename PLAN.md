@@ -231,6 +231,37 @@ crontab (15分間隔) から macOS ネイティブの launchd に移行。スリ
 
 ---
 
+### Phase L2: LLM-First Directional + Below-Market Limit — **完了**
+
+Phase L の LLM 分析を実戦投入可能な発注戦略に統合。3 つの改善:
+
+**1. LLM-First Directional**
+- LLM が directional (favored_team) を決定、校正テーブルは EV 安全弁のみ
+- Case A: hedge 存在 → 校正 directional/hedge を swap
+- Case B: hedge=None → `evaluate_single_outcome()` で LLM 側を独立評価
+- LLM 側にバンドなし or EV 非正 → 校正維持 (安全弁)
+
+**2. Below-Market Limit Orders**
+- 全注文を `best_ask - 0.01` で発注 (メイカー注文)
+- 合計 < 1.0 が自然に成立 → MERGE 利益が生まれる
+- fill は保証されないが NBA 価格変動で高確率
+
+**3. Hedge Target Pricing**
+- `max_hedge = min(hedge_max_price, target_combined - dir_vwap)`
+- `BOTHSIDE_TARGET_COMBINED=0.97` → MERGE 利鞘 3%/share
+- hedge は「フリーオプション」: fill しなくても directional だけで +EV
+
+**変更ファイル:**
+- `src/config.py`: `BOTHSIDE_TARGET_COMBINED` 追加
+- `src/strategy/calibration_scanner.py`: `evaluate_single_outcome()` 公開関数追加
+- `src/scheduler/job_executor.py`: LLM-First Case B + below-market pricing
+- `src/scheduler/trade_scheduler.py`: hedge ジョブ常時作成
+- `src/scheduler/hedge_executor.py`: target-based below-market limit + 注文板取得
+- `src/scheduler/dca_executor.py`: below-market pricing + hedge combined フィルター
+- `tests/test_llm_override.py`: 18 テスト
+
+---
+
 ## 今後のフェーズ (未着手)
 
 ### Phase C: Total (Over/Under) マーケット対応

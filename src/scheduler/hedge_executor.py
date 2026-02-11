@@ -55,15 +55,24 @@ def _schedule_hedge_job(
             paired_job_id=hedge_job_id,
             db_path=db_path,
         )
-        logger.info(
-            "Hedge job %d scheduled for %s (after=%s, bs_group=%s, hedge=%s @ %.3f)",
-            hedge_job_id,
-            directional_job.event_slug,
-            hedge_after.isoformat(),
-            bothside_group_id,
-            bothside_opp.hedge.outcome_name,
-            bothside_opp.hedge.poly_price,
-        )
+        if bothside_opp.hedge:
+            logger.info(
+                "Hedge job %d scheduled for %s (after=%s, bs_group=%s, hedge=%s @ %.3f)",
+                hedge_job_id,
+                directional_job.event_slug,
+                hedge_after.isoformat(),
+                bothside_group_id,
+                bothside_opp.hedge.outcome_name,
+                bothside_opp.hedge.poly_price,
+            )
+        else:
+            logger.info(
+                "Hedge job %d scheduled for %s (after=%s, bs_group=%s, hedge=pending)",
+                hedge_job_id,
+                directional_job.event_slug,
+                hedge_after.isoformat(),
+                bothside_group_id,
+            )
 
 
 def _get_directional_dca_group(directional_job_id: int, db_path: str) -> str:
@@ -137,7 +146,7 @@ def process_hedge_job(
             )
             return JobResult(job.id, job.event_slug, "skipped")
 
-        # Combined VWAP 再チェック
+        # Directional VWAP 算出
         dir_vwap = dir_price or 0.0
         if dir_signals:
             from src.strategy.dca_strategy import calculate_vwap_from_pairs
@@ -147,7 +156,46 @@ def process_hedge_job(
                 [s.fill_price or s.poly_price for s in dir_signals],
             )
 
-        combined = dir_vwap + hedge_price
+        # Target-based max hedge price
+        max_hedge_price = min(
+            settings.bothside_hedge_max_price,
+            settings.bothside_target_combined - dir_vwap,
+        )
+        if max_hedge_price < 0.20:
+            update_job_status(
+                job.id,
+                "skipped",
+                error_message=f"max_hedge_price {max_hedge_price:.3f} < 0.20 "
+                f"(dir_vwap={dir_vwap:.3f} target={settings.bothside_target_combined})",
+                db_path=db_path,
+            )
+            logger.info(
+                "Hedge job %d: max_hedge %.3f < 0.20 (dir_vwap=%.3f) → skipped",
+                job.id,
+                max_hedge_price,
+                dir_vwap,
+            )
+            return JobResult(job.id, job.event_slug, "skipped")
+
+        # 注文板取得 → below-market pricing
+        from src.connectors.polymarket import fetch_order_books_batch as _fetch_obs
+        from src.sizing.liquidity import extract_liquidity as _extract
+
+        best_ask = hedge_price  # fallback
+        try:
+            obs = _fetch_obs([hedge_token_id])
+            if obs and hedge_token_id in obs:
+                snap = _extract(obs[hedge_token_id], hedge_token_id)
+                if snap and snap.best_ask > 0:
+                    best_ask = snap.best_ask
+        except Exception:
+            logger.warning("Order book fetch failed for hedge %s", job.event_slug)
+
+        order_price = max(best_ask - 0.01, 0.01)  # below-market maker order
+        order_price = min(order_price, max_hedge_price)  # target 上限制限
+
+        # Combined VWAP 最終チェック (MERGE 上限)
+        combined = dir_vwap + order_price
         if combined >= settings.bothside_max_combined_vwap:
             update_job_status(
                 job.id,
@@ -164,28 +212,17 @@ def process_hedge_job(
             )
             return JobResult(job.id, job.event_slug, "skipped")
 
-        # Hedge 価格ガード
-        if hedge_price > settings.bothside_hedge_max_price:
-            update_job_status(
-                job.id,
-                "skipped",
-                error_message=f"Hedge price {hedge_price:.3f} > "
-                f"max {settings.bothside_hedge_max_price}",
-                db_path=db_path,
-            )
-            return JobResult(job.id, job.event_slug, "skipped")
-
-        # Calibration EV 再検証
+        # Calibration EV 再検証 (order_price で)
         from src.strategy.calibration import lookup_band
 
-        band = lookup_band(hedge_price)
+        band = lookup_band(order_price)
         if band is None:
             update_job_status(
                 job.id, "skipped", error_message="No calibration band for hedge", db_path=db_path
             )
             return JobResult(job.id, job.event_slug, "skipped")
 
-        ev = _ev_per_dollar(band.expected_win_rate, hedge_price)
+        ev = _ev_per_dollar(band.expected_win_rate, order_price)
         if ev <= 0:
             update_job_status(
                 job.id, "skipped", error_message="Hedge EV non-positive", db_path=db_path
@@ -193,7 +230,7 @@ def process_hedge_job(
             return JobResult(job.id, job.event_slug, "skipped")
 
         # サイジング (LLM hedge_ratio 適用: Phase L)
-        kelly = _calibration_kelly(band.expected_win_rate, hedge_price)
+        kelly = _calibration_kelly(band.expected_win_rate, order_price)
         hedge_mult = settings.bothside_hedge_kelly_mult
         if settings.llm_analysis_enabled:
             from src.strategy.llm_cache import get_cached_analysis
@@ -228,10 +265,11 @@ def process_hedge_job(
         if execution_mode == "dry-run":
             update_job_status(job.id, "skipped", error_message="dry-run mode", db_path=db_path)
             logger.info(
-                "[dry-run] Hedge job %d: BUY %s @ %.3f $%.0f combined=%.4f",
+                "[dry-run] Hedge job %d: BUY %s @ %.3f (best_ask=%.3f) $%.0f combined=%.4f",
                 job.id,
                 hedge_outcome,
-                hedge_price,
+                order_price,
+                best_ask,
                 budget.slice_size_usd,
                 combined,
             )
@@ -242,16 +280,16 @@ def process_hedge_job(
 
         from src.strategy.calibration import is_in_sweet_spot
 
-        sweet = is_in_sweet_spot(hedge_price, settings.sweet_spot_lo, settings.sweet_spot_hi)
+        sweet = is_in_sweet_spot(order_price, settings.sweet_spot_lo, settings.sweet_spot_hi)
         band_label = f"{band.price_lo:.2f}-{band.price_hi:.2f}"
-        edge_pct = (band.expected_win_rate - hedge_price) * 100
+        edge_pct = (band.expected_win_rate - order_price) * 100
 
         signal_id = log_signal(
             game_title=ml.event_title,
             event_slug=job.event_slug,
             team=hedge_outcome,
             side="BUY",
-            poly_price=hedge_price,
+            poly_price=order_price,
             book_prob=0.0,
             edge_pct=edge_pct,
             kelly_size=budget.slice_size_usd,
@@ -285,7 +323,7 @@ def process_hedge_job(
                 return JobResult(job.id, job.event_slug, "failed", signal_id, "preflight failed")
 
             try:
-                resp = place_limit_buy(hedge_token_id, hedge_price, budget.slice_size_usd)
+                resp = place_limit_buy(hedge_token_id, order_price, budget.slice_size_usd)
                 order_id = resp.get("orderID") or resp.get("id", "")
                 update_order_status(signal_id, order_id, "placed", db_path=db_path)
             except Exception as e:
@@ -317,11 +355,12 @@ def process_hedge_job(
             update_job_status(job.id, "executed", signal_id=signal_id, db_path=db_path)
 
         logger.info(
-            "Hedge job %d (%s): BUY %s @ %.3f $%.0f combined=%.4f signal #%d [%s]",
+            "Hedge job %d (%s): BUY %s @ %.3f (best_ask=%.3f) $%.0f combined=%.4f signal #%d [%s]",
             job.id,
             job.event_slug,
             hedge_outcome,
-            hedge_price,
+            order_price,
+            best_ask,
             budget.slice_size_usd,
             combined,
             signal_id,

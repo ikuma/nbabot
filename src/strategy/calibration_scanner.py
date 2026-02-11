@@ -211,6 +211,91 @@ def scan_calibration(
 
 
 # ---------------------------------------------------------------------------
+# Single-outcome evaluation (LLM-First directional Case B)
+# ---------------------------------------------------------------------------
+
+
+def evaluate_single_outcome(
+    price: float,
+    outcome_name: str,
+    token_id: str,
+    event_slug: str,
+    event_title: str,
+    balance_usd: float | None = None,
+    liquidity: LiquiditySnapshot | None = None,
+) -> CalibrationOpportunity | None:
+    """Evaluate a single outcome at given price.
+
+    Returns CalibrationOpportunity if the outcome has a positive EV band,
+    or None if no band or non-positive EV.
+    Used by LLM-First directional (Case B) when LLM recommends a side
+    that the bothside scanner didn't return as hedge.
+    """
+    if price <= 0 or price >= 1:
+        return None
+
+    band = lookup_band(price)
+    if band is None:
+        return None
+
+    expected_wr = band.expected_win_rate
+    ev = _ev_per_dollar(expected_wr, price)
+    if ev <= 0:
+        return None
+
+    kelly = _calibration_kelly(expected_wr, price)
+    sweet = is_in_sweet_spot(price, settings.sweet_spot_lo, settings.sweet_spot_hi)
+    if not sweet:
+        kelly *= 0.5
+
+    kelly_usd = min(kelly * settings.max_position_usd * 10, settings.max_position_usd)
+    edge_pct = (expected_wr - price) * 100
+    band_label = f"{band.price_lo:.2f}-{band.price_hi:.2f}"
+
+    # 3層制約
+    liq_score = "unknown"
+    binding = "kelly"
+    rec_exec = "immediate"
+    position_usd = kelly_usd
+
+    if balance_usd is not None or liquidity is not None:
+        sizing = calculate_position_size(
+            kelly_usd=kelly_usd,
+            balance_usd=balance_usd,
+            liquidity=liquidity,
+            max_position_usd=settings.max_position_usd,
+            capital_risk_pct=settings.capital_risk_pct,
+            liquidity_fill_pct=settings.liquidity_fill_pct,
+            max_spread_pct=settings.max_spread_pct,
+        )
+        position_usd = sizing.final_size_usd
+        liq_score = sizing.liquidity_score
+        binding = sizing.constraint_binding
+        rec_exec = sizing.recommended_execution
+        if rec_exec == "skip":
+            return None
+
+    return CalibrationOpportunity(
+        event_slug=event_slug,
+        event_title=event_title,
+        market_type="moneyline",
+        outcome_name=outcome_name,
+        token_id=token_id,
+        poly_price=price,
+        calibration_edge_pct=edge_pct,
+        expected_win_rate=expected_wr,
+        ev_per_dollar=ev,
+        price_band=band_label,
+        in_sweet_spot=sweet,
+        band_confidence=band.confidence,
+        position_usd=position_usd,
+        liquidity_score=liq_score,
+        constraint_binding=binding,
+        recommended_execution=rec_exec,
+    )
+
+
+# ---------------------------------------------------------------------------
 # Both-side betting (Phase B)
 # ---------------------------------------------------------------------------
 

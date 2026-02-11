@@ -216,6 +216,10 @@ def process_single_job(
 
             # --- LLM-First: directional を LLM が決定 ---
             if llm_analysis and bothside_opp and opp:
+                from src.strategy.calibration_scanner import (
+                    BothsideOpportunity,
+                    evaluate_single_outcome,
+                )
                 from src.strategy.llm_analyzer import determine_directional
 
                 # LLM の favored_team と校正スキャナーの directional を比較
@@ -233,25 +237,69 @@ def process_single_job(
                     _home_outcome,
                     _away_outcome,
                 )
-                # LLM が校正スキャナーと違う側を推奨した場合、入れ替え
-                if (
-                    bothside_opp.hedge
-                    and opp.outcome_name != dir_name
-                    and bothside_opp.hedge.outcome_name == dir_name
-                ):
-                    logger.info(
-                        "LLM override: %s -> %s (LLM favored=%s)",
-                        opp.outcome_name,
-                        dir_name,
-                        llm_analysis.favored_team,
-                    )
-                    opp = bothside_opp.hedge
-                    bothside_opp = type(bothside_opp)(
-                        directional=opp,
-                        hedge=bothside_opp.directional,
-                        combined_price=bothside_opp.combined_price,
-                        hedge_position_usd=bothside_opp.hedge_position_usd,
-                    )
+                # LLM が校正スキャナーと違う側を推奨した場合
+                if opp.outcome_name != dir_name:
+                    if (
+                        bothside_opp.hedge
+                        and bothside_opp.hedge.outcome_name == dir_name
+                    ):
+                        # Case A: hedge 存在 → swap
+                        logger.info(
+                            "LLM override (swap): %s -> %s (LLM favored=%s)",
+                            opp.outcome_name,
+                            dir_name,
+                            llm_analysis.favored_team,
+                        )
+                        opp = bothside_opp.hedge
+                        bothside_opp = BothsideOpportunity(
+                            directional=opp,
+                            hedge=bothside_opp.directional,
+                            combined_price=bothside_opp.combined_price,
+                            hedge_position_usd=bothside_opp.hedge_position_usd,
+                        )
+                    else:
+                        # Case B: hedge=None → LLM 側を独立評価
+                        _llm_price = None
+                        _llm_token_id = None
+                        for _i, _oc in enumerate(ml.outcomes):
+                            if _oc == dir_name and _i < len(ml.prices):
+                                _llm_price = ml.prices[_i]
+                                _llm_token_id = ml.token_ids[_i] if _i < len(ml.token_ids) else None
+                                break
+                        if _llm_price and _llm_token_id:
+                            _liq = liquidity_map.get(_llm_token_id) if liquidity_map else None
+                            _llm_opp = evaluate_single_outcome(
+                                price=_llm_price,
+                                outcome_name=dir_name,
+                                token_id=_llm_token_id,
+                                event_slug=ml.event_slug,
+                                event_title=ml.event_title,
+                                balance_usd=balance_usd,
+                                liquidity=_liq,
+                            )
+                            if _llm_opp:
+                                logger.info(
+                                    "LLM override (Case B): %s -> %s @ %.3f ev=%.3f",
+                                    opp.outcome_name,
+                                    dir_name,
+                                    _llm_price,
+                                    _llm_opp.ev_per_dollar,
+                                )
+                                old_dir = opp
+                                opp = _llm_opp
+                                bothside_opp = BothsideOpportunity(
+                                    directional=opp,
+                                    hedge=old_dir,
+                                    combined_price=opp.poly_price + old_dir.poly_price,
+                                    hedge_position_usd=old_dir.position_usd * effective_hedge_mult,
+                                )
+                            else:
+                                logger.info(
+                                    "LLM Case B: %s @ %.3f no EV band, keeping %s",
+                                    dir_name,
+                                    _llm_price or 0,
+                                    opp.outcome_name,
+                                )
         else:
             opps = scan_calibration([ml], balance_usd=balance_usd, liquidity_map=liquidity_map)
             opp = opps[0] if opps else None
@@ -372,7 +420,7 @@ def process_single_job(
             size_usd = budget.slice_size_usd
             order_price = opp.poly_price
             if _liq_snap and _liq_snap.best_ask > 0:
-                order_price = _liq_snap.best_ask
+                order_price = max(_liq_snap.best_ask - 0.01, 0.01)  # below-market maker order
             try:
                 resp = place_limit_buy(opp.token_id, order_price, size_usd)
                 order_id = resp.get("orderID") or resp.get("id", "")

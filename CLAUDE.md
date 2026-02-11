@@ -41,6 +41,7 @@ Polymarket NBA キャリブレーション Bot。Polymarket の構造的ミス�
 | F1 | Bothside + MERGE デフォルト有効化 | **完了** |
 | L | LLM ベース試合分析 (3 ペルソナ + シンセシス) | **完了** |
 | W | launchd 移行 + 死活監視 (watchdog) | **完了** |
+| L2 | LLM-First Directional + Below-Market Limit | **完了** |
 | C | Total (O/U) マーケット校正 | 未着手 |
 | E | スケール + 本番運用 ($30-50K) | 未着手 |
 
@@ -314,7 +315,8 @@ Gamma Events API ──→ MoneylineMarket[] ──────────┤
 | `DCA_MAX_PRICE_SPREAD` | No | 初回→最新の最大価格差 (default: 0.15, 超えたら DCA 停止) |
 | `DCA_MIN_INTERVAL_MIN` | No | DCA 最小間隔 (分, default: 30) |
 | `BOTHSIDE_ENABLED` | No | 両サイドベット有効/無効 (default: true) |
-| `BOTHSIDE_MAX_COMBINED_VWAP` | No | combined VWAP 上限 (default: 0.995, 超えたら hedge しない) |
+| `BOTHSIDE_MAX_COMBINED_VWAP` | No | combined VWAP 上限 (default: 0.995, MERGE 判定上限) |
+| `BOTHSIDE_TARGET_COMBINED` | No | hedge 指値算出基準 (default: 0.97, MERGE 利鞘 3%/share) |
 | `BOTHSIDE_HEDGE_KELLY_MULT` | No | hedge 側 Kelly 乗数 (default: 0.5) |
 | `BOTHSIDE_HEDGE_DELAY_MIN` | No | directional→hedge 最小遅延 (分, default: 30) |
 | `BOTHSIDE_HEDGE_MAX_PRICE` | No | hedge 価格上限 (default: 0.55) |
@@ -391,3 +393,7 @@ Gamma Events API ──→ MoneylineMarket[] ──────────┤
 - LLM 試合分析 (Phase L): 3 ペルソナ (Polymarket 凄腕トレーダー, クオンツ, リスク管理) 並列呼び出し + シンセシス統合。LLM が directional (favored_team) を決定し、校正テーブルはサイジングのみ。`LLM_ANALYSIS_ENABLED=false` (デフォルト) で無効化。全 LLM 障害は従来パイプラインにフォールバック。
 - LLM 分析は `llm_analyses` テーブルに event_slug 単位でキャッシュ。DCA 後続・hedge は同一キャッシュを再利用。
 - LLM コスト: Opus 4.6 ($72/月), Sonnet 4.5 ($14/月), Haiku 4.5 ($5/月)。`LLM_MODEL` env で切替可能。
+- LLM-First Directional (Phase L2): LLM が directional を決定、校正は EV 安全弁のみ。Case A (hedge 存在→swap)、Case B (hedge=None→`evaluate_single_outcome()` で LLM 側を独立評価)。LLM 側にバンドなし or EV 非正 → 校正維持。
+- Below-Market Limit Orders (Phase L2): 全注文を `best_ask - 0.01` で発注 (メイカー注文)。手数料優遇 + 合計 < 1.0 が自然に成立 → MERGE 利益。fill は保証されないが NBA 価格変動 (±2-5c/7.5h) で高確率。
+- Hedge Target Pricing (Phase L2): `max_hedge = min(hedge_max_price, target_combined - dir_vwap)` で上限を算出。`BOTHSIDE_TARGET_COMBINED` (default 0.97) で MERGE 利鞘 3%/share を確保。hedge は「フリーオプション」: fill しなくても directional だけで +EV。
+- hedge ジョブは常時作成 (bothside_opp の hedge=None でも)。実行時に注文板を取得し target-based pricing で発注可否を判定。

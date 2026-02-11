@@ -20,6 +20,29 @@ from src.store.db import (
 logger = logging.getLogger(__name__)
 
 
+def _get_directional_vwap(paired_job_id: int | None, db_path: str) -> float:
+    """Get directional job's DCA group VWAP for hedge combined target."""
+    if not paired_job_id:
+        return 0.0
+    try:
+        from src.scheduler.hedge_executor import _get_directional_dca_group
+        from src.strategy.dca_strategy import calculate_vwap_from_pairs
+
+        group_id = _get_directional_dca_group(paired_job_id, db_path)
+        if not group_id:
+            return 0.0
+        signals = get_dca_group_signals(group_id, db_path=db_path)
+        if not signals:
+            return 0.0
+        return calculate_vwap_from_pairs(
+            [s.kelly_size for s in signals],
+            [s.fill_price or s.poly_price for s in signals],
+        )
+    except Exception:
+        logger.warning("Failed to get directional VWAP for paired_job_id=%d", paired_job_id)
+        return 0.0
+
+
 def process_dca_active_jobs(
     execution_mode: str = "paper",
     db_path: str | None = None,
@@ -102,6 +125,21 @@ def process_dca_active_jobs(
         if current_price is None:
             logger.warning("Cannot find price for %s in job %d", target_team, job.id)
             continue
+
+        # Hedge DCA: combined target フィルター
+        if job.job_side == "hedge" and settings.bothside_enabled:
+            _dir_vwap = _get_directional_vwap(job.paired_job_id, path)
+            if _dir_vwap > 0:
+                _max_hedge = settings.bothside_target_combined - _dir_vwap
+                if current_price > _max_hedge:
+                    logger.debug(
+                        "Hedge DCA skip: price %.3f > max_hedge %.3f (dir_vwap=%.3f target=%.3f)",
+                        current_price,
+                        _max_hedge,
+                        _dir_vwap,
+                        settings.bothside_target_combined,
+                    )
+                    continue
 
         # DCA エントリーを構築
         entries = []
@@ -195,10 +233,33 @@ def process_dca_active_jobs(
             db_path=path,
         )
 
-        # live モード: 実発注
+        # live モード: below-market 指値で発注
         if execution_mode == "live":
             try:
-                resp = place_limit_buy(target_token_id, current_price, dca_size)
+                dca_order_price = current_price  # fallback
+                try:
+                    from src.connectors.polymarket import (
+                        fetch_order_books_batch as _fetch_obs_dca,
+                    )
+                    from src.sizing.liquidity import extract_liquidity as _extract_dca
+
+                    _obs = _fetch_obs_dca([target_token_id])
+                    if _obs and target_token_id in _obs:
+                        _snap = _extract_dca(_obs[target_token_id], target_token_id)
+                        if _snap and _snap.best_ask > 0:
+                            dca_order_price = max(_snap.best_ask - 0.01, 0.01)
+                except Exception:
+                    logger.warning("DCA order book fetch failed for job %d", job.id)
+
+                # hedge DCA: target combined で上限制限
+                if job.job_side == "hedge" and settings.bothside_enabled:
+                    _dir_vwap2 = _get_directional_vwap(job.paired_job_id, path)
+                    if _dir_vwap2 > 0:
+                        _max_h = settings.bothside_target_combined - _dir_vwap2
+                        dca_order_price = min(dca_order_price, _max_h)
+                        dca_order_price = max(dca_order_price, 0.01)
+
+                resp = place_limit_buy(target_token_id, dca_order_price, dca_size)
                 order_id = resp.get("orderID") or resp.get("id", "")
                 update_order_status(new_signal_id, order_id, "placed", db_path=path)
             except Exception as e:
