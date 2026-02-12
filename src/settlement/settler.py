@@ -231,7 +231,9 @@ def _refresh_order_statuses_legacy(db_path: Path | str | None = None) -> None:
         if order_status in ("matched", "filled"):
             avg_price = None
             try:
-                avg_price = float(status.get("associate_trades", [{}])[0].get("price", 0))
+                trades = status.get("associate_trades", [])
+                if trades and isinstance(trades[0], dict):
+                    avg_price = float(trades[0].get("price", 0))
             except (IndexError, KeyError, TypeError, ValueError):
                 pass
             if not avg_price:

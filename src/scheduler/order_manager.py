@@ -54,9 +54,11 @@ class OrderTickSummary:
 def _extract_fill_price(status: dict, fallback_price: float) -> float:
     """Extract average fill price from CLOB order status."""
     try:
-        avg_price = float(status.get("associate_trades", [{}])[0].get("price", 0))
-        if avg_price > 0:
-            return avg_price
+        trades = status.get("associate_trades", [])
+        if trades and isinstance(trades[0], dict):
+            avg_price = float(trades[0].get("price", 0))
+            if avg_price > 0:
+                return avg_price
     except (IndexError, KeyError, TypeError, ValueError):
         pass
     try:
