@@ -17,6 +17,7 @@ DOMAIN="gui/$(id -u)"
 
 PLISTS=(
     "com.nbabot.scheduler"
+    "com.nbabot.ordermgr"
     "com.nbabot.watchdog"
 )
 

@@ -262,6 +262,23 @@ def process_dca_active_jobs(
                 resp = place_limit_buy(target_token_id, dca_order_price, dca_size)
                 order_id = resp.get("orderID") or resp.get("id", "")
                 update_order_status(new_signal_id, order_id, "placed", db_path=path)
+                # Order lifecycle 記録 (Phase O)
+                from src.store.db import log_order_event, update_order_lifecycle
+
+                _now_iso = datetime.now(timezone.utc).isoformat()
+                update_order_lifecycle(
+                    new_signal_id,
+                    order_placed_at=_now_iso,
+                    order_original_price=dca_order_price,
+                    db_path=path,
+                )
+                log_order_event(
+                    signal_id=new_signal_id,
+                    event_type="placed",
+                    order_id=order_id,
+                    price=dca_order_price,
+                    db_path=path,
+                )
             except Exception as e:
                 update_order_status(new_signal_id, None, "failed", db_path=path)
                 logger.exception("DCA order failed for job %d", job.id)

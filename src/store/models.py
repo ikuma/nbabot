@@ -67,6 +67,11 @@ class SignalRecord:
     # Fee tracking (Phase M3)
     fee_rate_bps: float = 0.0
     fee_usd: float = 0.0
+    # Order lifecycle (Phase O)
+    order_placed_at: str | None = None
+    order_replace_count: int = 0
+    order_last_checked_at: str | None = None
+    order_original_price: float | None = None
 
 
 @dataclass
@@ -135,6 +140,17 @@ class JobSummary:
     expired: int = 0
     cancelled: int = 0
     dca_active: int = 0
+
+
+@dataclass
+class OrderEvent:
+    id: int
+    signal_id: int
+    event_type: str  # 'placed'|'filled'|'cancelled'|'replaced'|'expired'
+    order_id: str | None
+    price: float | None
+    best_ask_at_event: float | None
+    created_at: str
 
 
 @dataclass

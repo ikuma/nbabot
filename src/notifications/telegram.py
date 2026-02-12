@@ -280,6 +280,49 @@ def notify_merge(
         return False
 
 
+def notify_order_replaced(
+    *,
+    event_slug: str,
+    outcome_name: str,
+    old_price: float,
+    new_price: float,
+    best_ask: float,
+    replace_count: int,
+    max_replaces: int,
+) -> bool:
+    """Send notification when an order is replaced at a new price."""
+    try:
+        lines = [
+            f"*Order Replaced ({replace_count}/{max_replaces})*",
+            f"BUY {escape_md(outcome_name)} | {escape_md(event_slug)}",
+            f"Old: {old_price:.3f} -> New: {new_price:.3f} (ask {best_ask:.3f})",
+        ]
+        return send_message("\n".join(lines))
+    except Exception:
+        logger.debug("notify_order_replaced failed", exc_info=True)
+        return False
+
+
+def notify_order_filled_early(
+    *,
+    event_slug: str,
+    outcome_name: str,
+    fill_price: float,
+    signal_id: int,
+) -> bool:
+    """Send notification when order manager detects a fill."""
+    try:
+        lines = [
+            f"*Order Filled*",
+            f"BUY {escape_md(outcome_name)} @ {fill_price:.3f}",
+            f"{escape_md(event_slug)} | signal #{signal_id}",
+        ]
+        return send_message("\n".join(lines))
+    except Exception:
+        logger.debug("notify_order_filled_early failed", exc_info=True)
+        return False
+
+
 def notify_tick_header(
     game_date: str,
     found: int,

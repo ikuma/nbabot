@@ -380,6 +380,26 @@ def process_single_job(
                 resp = place_limit_buy(opp.token_id, order_price, size_usd)
                 order_id = resp.get("orderID") or resp.get("id", "")
                 update_order_status(signal_id, order_id, "placed", db_path=db_path)
+                # Order lifecycle 記録 (Phase O)
+                from datetime import datetime, timezone
+
+                from src.store.db import log_order_event, update_order_lifecycle
+
+                _now_iso = datetime.now(timezone.utc).isoformat()
+                update_order_lifecycle(
+                    signal_id,
+                    order_placed_at=_now_iso,
+                    order_original_price=order_price,
+                    db_path=db_path,
+                )
+                log_order_event(
+                    signal_id=signal_id,
+                    event_type="placed",
+                    order_id=order_id,
+                    price=order_price,
+                    best_ask_at_event=_liq_snap.best_ask if _liq_snap and _liq_snap.best_ask > 0 else None,
+                    db_path=db_path,
+                )
                 logger.info(
                     "[live] Job %d: BUY %s @ %.3f $%.0f order=%s (liq=%s, bind=%s)",
                     job.id,

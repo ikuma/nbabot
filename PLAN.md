@@ -516,6 +516,52 @@ Phase Q の連続校正カーブを活用し、2 つの残存問題を解決:
 
 ---
 
+## Phase O: 注文実行改善 (Order Lifecycle Manager) ✅
+
+**目的**: 注文の寿命管理 + 短周期監視 → 約定率改善。best_ask が動いた場合に注文が取り残されるのを防ぐ。
+
+**設計**: 2 分間隔の独立 order manager プロセス (launchd)。既存の 15 分戦略 tick とは独立して注文監視。
+
+| プロセス | 間隔 | 役割 | ロック |
+|----------|------|------|--------|
+| scheduler | 900s | 戦略判断 + 発注 | `/tmp/nbabot-scheduler.lock` |
+| order-manager | 120s | 注文監視 + cancel/re-place | `/tmp/nbabot-ordermgr.lock` |
+| watchdog | 600s | 死活監視 | なし |
+
+**ロジック**:
+1. `get_active_placed_orders()` で未約定注文を取得
+2. CLOB API で fill 検出 → DB 更新 + 通知
+3. TTL 超過 (`ORDER_TTL_MIN=5`) → best_ask 取得 → cancel + re-place at `best_ask - 0.01`
+4. `ORDER_MAX_REPLACES=3` 超過 → cancel + expired
+5. ティップオフ過ぎ → cancel + expired
+6. hedge は `target_combined` 制約を再チェック
+
+**DB 変更**:
+- signals: `order_placed_at`, `order_replace_count`, `order_last_checked_at`, `order_original_price`
+- `order_events` テーブル (将来の約定確率モデルの学習データにもなる)
+
+**settler 統合**: `_refresh_order_statuses()` が `order_manager.check_and_manage_orders()` に委譲。order_manager launchd 停止時も settler で最低限の fill 検出がフォールバック。
+
+実装:
+- `src/scheduler/order_manager.py`: 注文ライフサイクル管理コアロジック (~290 行)
+- `src/store/schema.py`: signals に 4 カラム + `order_events` テーブル
+- `src/store/models.py`: `SignalRecord` 新フィールド + `OrderEvent` dataclass
+- `src/store/db.py`: `get_active_placed_orders()`, `log_order_event()`, `update_order_lifecycle()`, `get_order_events()`
+- `src/config.py`: 6 設定パラメータ追加
+- `src/connectors/polymarket.py`: `cancel_and_replace_order()` 追加
+- `src/notifications/telegram.py`: `notify_order_replaced()`, `notify_order_filled_early()` 追加
+- `src/settlement/settler.py`: `_refresh_order_statuses()` を order_manager に委譲 + legacy フォールバック
+- `src/scheduler/job_executor.py`: 発注後に `order_placed_at`, `order_original_price` 記録
+- `src/scheduler/hedge_executor.py`: 同上
+- `src/scheduler/dca_executor.py`: 同上
+- `scripts/order_tick.py`: launchd エントリポイント
+- `scripts/cron_ordermgr.sh`: bash ラッパー (ロック + caffeinate)
+- `launchd/com.nbabot.ordermgr.plist`: 120s 間隔 launchd ジョブ
+- `scripts/install_launchd.sh`: 3 ジョブインストール対応
+- `tests/test_order_manager.py`: 16 テスト
+
+---
+
 ## ウォレットセキュリティ
 - **Cold Wallet (70%)**: ハードウェアウォレット、手動のみ
 - **Hot Wallet (30%)**: BOT用、取引上限付き

@@ -51,6 +51,7 @@ Polymarket NBA キャリブレーション Bot。Polymarket の構造的ミス�
 | S | 期待P&L vs 実現P&L トラッカー (エッジ減衰検出) | **完了** |
 | Q | 連続校正カーブ + 不確実性定量化 (Isotonic+PCHIP+Beta) | **完了** |
 | Q2 | 保守的サイジング改革 (連続不確実性ベース) | **完了** |
+| O | 注文実行改善 (Order Lifecycle Manager) | **完了** |
 | C | Total (O/U) マーケット校正 | 未着手 |
 | E | スケール + 本番運用 ($30-50K) | 未着手 |
 
@@ -88,6 +89,7 @@ nbabot/
 │   │   ├── hedge_executor.py         # Hedge ジョブ処理 (bothside)
 │   │   ├── dca_executor.py           # DCA 追加購入処理
 │   │   ├── merge_executor.py         # MERGE 処理 (CTF mergePositions)
+│   │   ├── order_manager.py          # 注文ライフサイクル管理 (Phase O — fill検出, TTL, re-place)
 │   │   └── preflight.py             # 発注前チェック (残高, 日次上限)
 │   ├── settlement/
 │   │   ├── pnl_calc.py              # 決済 P&L 計算 (DCA, bothside, merge)
@@ -117,6 +119,8 @@ nbabot/
 │   ├── settle.py                     # 決済 CLI (コアは src/settlement/)
 │   ├── schedule_trades.py            # 試合別スケジューラー CLI (主エントリ)
 │   ├── cron_schedule.sh              # スケジューラー launchd ラッパー (15分間隔, 24/7, caffeinate 付き)
+│   ├── order_tick.py                 # 注文ライフサイクル管理 CLI (2分間隔, Phase O)
+│   ├── cron_ordermgr.sh              # order manager launchd ラッパー (2分間隔, caffeinate 付き)
 │   ├── watchdog.py                   # 死活監視 (heartbeat mtime チェック → Telegram アラート)
 │   ├── install_launchd.sh            # launchd ジョブ冪等インストーラー
 │   ├── cron_scan.sh                  # 旧 cron ラッパー (無効化済み・手動用)
@@ -128,6 +132,7 @@ nbabot/
 │   └── compare_traders.py            # 複数トレーダー比較レポート
 ├── launchd/
 │   ├── com.nbabot.scheduler.plist    # launchd 定期実行 (15分, スリープ復帰対応)
+│   ├── com.nbabot.ordermgr.plist     # launchd 注文管理 (2分, Phase O)
 │   └── com.nbabot.watchdog.plist     # launchd 死活監視 (10分)
 ├── agents/                           # エージェントプロンプト
 ├── data/reports/                     # 日次レポート出力先 (.gitignore 対象)
@@ -238,6 +243,31 @@ scripts/schedule_trades.py
      │   レベル変更時: Telegram アラート通知
      │
      └── 5. Telegram サマリー通知
+```
+
+### Order Manager (Phase O — 2分間隔)
+
+```
+launchd (2分間隔)
+     │
+     ▼
+scripts/order_tick.py
+     │
+     ├── 0. execution_mode != 'live' → 早期終了
+     │
+     ├── 1. get_active_placed_orders()
+     │     order_status='placed' かつ未決済 かつ execute_before > now
+     │
+     ├── 2. 各注文を check_single_order():
+     │   ├── CLOB API で fill 検出 → DB 更新 + 通知
+     │   ├── TTL チェック (ORDER_TTL_MIN=5) → 未達なら kept
+     │   ├── max_replaces 超過 → cancel + expired
+     │   ├── ティップオフ過ぎ → cancel + expired
+     │   └── best_ask 取得 → cancel + re-place at (best_ask - 0.01)
+     │       (hedge は target_combined 制約を再チェック)
+     │
+     ├── 3. Telegram サマリー (fill/replace があった場合のみ)
+     └── 4. heartbeat_ordermgr 更新
 ```
 
 ### Calibration モード (手動スキャン — バックアップ)
@@ -357,6 +387,12 @@ Gamma Events API ──→ MoneylineMarket[] ──────────┤
 | `LLM_TIMEOUT_SEC` | No | 各ペルソナ呼び出しタイムアウト秒 (default: 30) |
 | `LLM_MAX_SIZING_MODIFIER` | No | LLM sizing_modifier 上限 (default: 1.5) |
 | `LLM_MIN_SIZING_MODIFIER` | No | LLM sizing_modifier 下限 (default: 0.5) |
+| `ORDER_MANAGER_ENABLED` | No | order manager 有効/無効 (default: true) |
+| `ORDER_TTL_MIN` | No | 未約定注文の TTL 分 (default: 5) |
+| `ORDER_MAX_REPLACES` | No | 最大再発注回数 (default: 3) |
+| `ORDER_MIN_PRICE_MOVE` | No | 再発注トリガーの最小価格移動 (default: 0.01) |
+| `ORDER_CHECK_BATCH_SIZE` | No | 1 tick あたり最大チェック数 (default: 10) |
+| `ORDER_RATE_LIMIT_SLEEP` | No | API 呼び出し間の sleep 秒 (default: 0.5) |
 
 ## セキュリティ
 
@@ -421,3 +457,4 @@ Gamma Events API ──→ MoneylineMarket[] ──────────┤
 - 期待P&L トラッカー (Phase S): `expectation_tracker.py` で校正テーブル予測 EV と実現 P&L の月次乖離を算出。3 期間連続で乖離拡大 (gap_pct < -10%) の場合にエッジ減衰警告。report_generator に統合済み。
 - 連続校正カーブ (Phase Q): 離散 5c バンドを Isotonic Regression (PAVA) + PCHIP 補間 + Beta 事後分布で連続・単調・保守的な関数に置換。`calibration_curve.py` の `ContinuousCalibration` クラスが中核。`get_default_curve()` でハードコードテーブルから遅延初期化 (キャッシュ付き)。`expected_win_rate` に Beta 下限推定 (`lower_bound`) を入れることで downstream 変更ゼロ。小サンプル (N=22, 勝率 100%) の下限が ~93% に補正され、過大サイジングを防止。`CALIBRATION_CONFIDENCE_LEVEL` (default 0.90) で事後分布のパーセンタイルを制御。依存: scipy>=1.12。`--continuous` フラグで `rebuild_calibration_and_backtest.py` から連続カーブの診断出力が可能。
 - 保守的サイジング改革 (Phase Q2): 固定スイートスポット境界 (`if not sweet: kelly *= 0.5`) を連続的な `_confidence_multiplier(est)` に置換。CI 幅 (`lower_bound / point_estimate`) で Kelly 乗数を [0.5, 1.0] に連続スケーリング。Sweet spot 内は旧 1.0 → 新 0.85-0.94 (小サンプルバンドが自動縮小)、Sweet spot 外は旧 0.5 → 新 0.91-0.95 (高勝率バンドの不当な過小サイジングを修正)。`in_sweet_spot` は Kelly サイジングからは分離し、診断用メタデータのみに使用。`sweet_spot_lo/hi` 設定は温存 (DB メタデータ生成用)。DCA 未約定エクスポージャー: `get_pending_dca_exposure()` で dca_active ジョブの残りスライスを潜在エクスポージャーとして計上し、preflight チェックで placed + pending DCA の合算で上限判定。
+- 注文ライフサイクル管理 (Phase O): 2 分間隔の独立 order manager プロセス (`order_tick.py` / launchd)。`place_limit_buy()` 後の注文を短周期で監視し、fill 検出・TTL 超過時の cancel/re-place を実行。`ORDER_TTL_MIN` (default 5 分) で未約定注文を検出し、`best_ask - 0.01` で再発注。最大 `ORDER_MAX_REPLACES` (default 3) 回まで。hedge の re-place は `target_combined` 制約を再チェック。signals に `order_placed_at`, `order_replace_count`, `order_last_checked_at`, `order_original_price` を追加。`order_events` テーブルで全ライフサイクルイベントを記録 (将来の約定確率モデルの学習データ)。settler の `_refresh_order_statuses()` は order_manager に委譲し、launchd 停止時は legacy フォールバック。`ORDER_MANAGER_ENABLED=false` で無効化可能。

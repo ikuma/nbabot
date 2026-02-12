@@ -10,6 +10,7 @@ from src.store.models import (  # noqa: F401
     JobStatus,
     JobSummary,
     MergeOperation,
+    OrderEvent,
     PerformanceStats,
     ResultRecord,
     SignalRecord,
@@ -1350,5 +1351,125 @@ def force_stop_dca_jobs(
         )
         conn.commit()
         return cur.rowcount
+    finally:
+        conn.close()
+
+
+# ---------------------------------------------------------------------------
+# Order lifecycle helpers (Phase O)
+# ---------------------------------------------------------------------------
+
+
+def get_active_placed_orders(
+    db_path: Path | str = DEFAULT_DB_PATH,
+) -> list[SignalRecord]:
+    """Return signals with order_status='placed', unsettled, and within execution window."""
+    now_utc = datetime.now(timezone.utc).isoformat()
+    conn = _connect(db_path)
+    try:
+        rows = conn.execute(
+            """SELECT s.* FROM signals s
+               LEFT JOIN results r ON r.signal_id = s.id
+               JOIN trade_jobs j ON j.event_slug = s.event_slug
+                 AND j.job_side = s.signal_role
+               WHERE r.id IS NULL
+                 AND s.order_status = 'placed'
+                 AND s.order_id IS NOT NULL
+                 AND j.execute_before > ?
+               ORDER BY s.created_at ASC""",
+            (now_utc,),
+        ).fetchall()
+        return [SignalRecord(**dict(r)) for r in rows]
+    finally:
+        conn.close()
+
+
+def log_order_event(
+    *,
+    signal_id: int,
+    event_type: str,
+    order_id: str | None = None,
+    price: float | None = None,
+    best_ask_at_event: float | None = None,
+    db_path: Path | str = DEFAULT_DB_PATH,
+) -> int:
+    """Insert an order lifecycle event. Returns event row id."""
+    now = datetime.now(timezone.utc).isoformat()
+    conn = _connect(db_path)
+    try:
+        cur = conn.execute(
+            """INSERT INTO order_events
+               (signal_id, event_type, order_id, price, best_ask_at_event, created_at)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (signal_id, event_type, order_id, price, best_ask_at_event, now),
+        )
+        conn.commit()
+        return cur.lastrowid  # type: ignore[return-value]
+    finally:
+        conn.close()
+
+
+def update_order_lifecycle(
+    signal_id: int,
+    *,
+    order_id: str | None = None,
+    order_status: str | None = None,
+    fill_price: float | None = None,
+    order_placed_at: str | None = None,
+    order_replace_count: int | None = None,
+    order_last_checked_at: str | None = None,
+    order_original_price: float | None = None,
+    db_path: Path | str = DEFAULT_DB_PATH,
+) -> None:
+    """Update order lifecycle fields on a signal."""
+    conn = _connect(db_path)
+    try:
+        parts: list[str] = []
+        params: list[object] = []
+        if order_id is not None:
+            parts.append("order_id = ?")
+            params.append(order_id)
+        if order_status is not None:
+            parts.append("order_status = ?")
+            params.append(order_status)
+        if fill_price is not None:
+            parts.append("fill_price = ?")
+            params.append(fill_price)
+        if order_placed_at is not None:
+            parts.append("order_placed_at = ?")
+            params.append(order_placed_at)
+        if order_replace_count is not None:
+            parts.append("order_replace_count = ?")
+            params.append(order_replace_count)
+        if order_last_checked_at is not None:
+            parts.append("order_last_checked_at = ?")
+            params.append(order_last_checked_at)
+        if order_original_price is not None:
+            parts.append("order_original_price = ?")
+            params.append(order_original_price)
+        if not parts:
+            return
+        params.append(signal_id)
+        conn.execute(
+            f"UPDATE signals SET {', '.join(parts)} WHERE id = ?",
+            tuple(params),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def get_order_events(
+    signal_id: int,
+    db_path: Path | str = DEFAULT_DB_PATH,
+) -> list[OrderEvent]:
+    """Get all order events for a signal."""
+    conn = _connect(db_path)
+    try:
+        rows = conn.execute(
+            "SELECT * FROM order_events WHERE signal_id = ? ORDER BY id ASC",
+            (signal_id,),
+        ).fetchall()
+        return [OrderEvent(**dict(r)) for r in rows]
     finally:
         conn.close()

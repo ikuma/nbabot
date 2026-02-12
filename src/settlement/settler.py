@@ -171,7 +171,35 @@ def settle_signal(signal_id: int, winner: str, db_path: Path | str | None = None
 
 
 def _refresh_order_statuses(db_path: Path | str | None = None) -> None:
-    """Check placed orders for fills; cancel orders older than 24h."""
+    """Check placed orders for fills and manage lifecycle.
+
+    Delegates to order_manager.check_and_manage_orders() which handles
+    fill detection, TTL-based cancel/re-place, and stale order cleanup.
+    This serves as a fallback when the order_manager launchd job is not running.
+    """
+    from src.store.db import DEFAULT_DB_PATH
+
+    path = str(db_path or DEFAULT_DB_PATH)
+
+    try:
+        from src.scheduler.order_manager import check_and_manage_orders
+
+        summary = check_and_manage_orders(execution_mode="live", db_path=path)
+        if summary.checked > 0:
+            log.info(
+                "Order refresh: checked=%d filled=%d replaced=%d expired=%d",
+                summary.checked,
+                summary.filled,
+                summary.replaced,
+                summary.expired,
+            )
+    except Exception:
+        log.exception("Order manager delegation failed, falling back to basic check")
+        _refresh_order_statuses_legacy(db_path=db_path)
+
+
+def _refresh_order_statuses_legacy(db_path: Path | str | None = None) -> None:
+    """Legacy fallback: check placed orders for fills; cancel orders older than 24h."""
     from datetime import datetime, timedelta, timezone
 
     from src.store.db import DEFAULT_DB_PATH, get_placed_orders, update_order_status
@@ -181,7 +209,7 @@ def _refresh_order_statuses(db_path: Path | str | None = None) -> None:
     if not placed:
         return
 
-    log.info("Checking %d placed order(s) for fill status", len(placed))
+    log.info("Legacy check: %d placed order(s)", len(placed))
 
     from src.connectors.polymarket import cancel_order, get_order_status
 

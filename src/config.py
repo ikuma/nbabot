@@ -101,6 +101,14 @@ class Settings(BaseSettings):
     # === Calibration confidence (Phase Q) ===
     calibration_confidence_level: float = 0.90  # Beta posterior lower percentile
 
+    # === Order lifecycle manager (Phase O) ===
+    order_manager_enabled: bool = True
+    order_ttl_min: int = 5  # 未約定注文の TTL (分)
+    order_max_replaces: int = 3  # 最大再発注回数
+    order_min_price_move: float = 0.01  # 再発注トリガーの最小価格移動
+    order_check_batch_size: int = 10  # 1 tick あたり最大チェック数
+    order_rate_limit_sleep: float = 0.5  # API 呼び出し間の sleep 秒
+
     # === MERGE (Phase B2) ===
     merge_enabled: bool = True  # MERGE はデフォルト有効 (BOTHSIDE とは独立)
     merge_max_combined_vwap: float = 0.998  # これ以上なら MERGE しない

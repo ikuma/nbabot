@@ -330,6 +330,24 @@ def process_hedge_job(
                 resp = place_limit_buy(hedge_token_id, order_price, budget.slice_size_usd)
                 order_id = resp.get("orderID") or resp.get("id", "")
                 update_order_status(signal_id, order_id, "placed", db_path=db_path)
+                # Order lifecycle 記録 (Phase O)
+                from src.store.db import log_order_event, update_order_lifecycle
+
+                _now_iso = datetime.now(timezone.utc).isoformat()
+                update_order_lifecycle(
+                    signal_id,
+                    order_placed_at=_now_iso,
+                    order_original_price=order_price,
+                    db_path=db_path,
+                )
+                log_order_event(
+                    signal_id=signal_id,
+                    event_type="placed",
+                    order_id=order_id,
+                    price=order_price,
+                    best_ask_at_event=best_ask,
+                    db_path=db_path,
+                )
             except Exception as e:
                 update_order_status(signal_id, None, "failed", db_path=db_path)
                 update_job_status(

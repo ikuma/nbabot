@@ -406,6 +406,30 @@ def cancel_order(order_id: str) -> bool:
         return False
 
 
+def cancel_and_replace_order(
+    old_order_id: str,
+    token_id: str,
+    new_price: float,
+    size_usd: float,
+) -> dict:
+    """Cancel an existing order and place a new one at a different price.
+
+    Returns the new order response dict (with 'orderID' key) on success.
+    Raises on failure (caller should handle).
+    """
+    import time
+
+    # 1. Cancel old order
+    cancelled = cancel_order(old_order_id)
+    if not cancelled:
+        logger.warning("Could not cancel order %s, proceeding with new order anyway", old_order_id)
+
+    time.sleep(0.3)  # レート制限対策
+
+    # 2. Place new order
+    return place_limit_buy(token_id, new_price, size_usd)
+
+
 # ---------------------------------------------------------------------------
 # Events API – per-game moneyline markets
 # ---------------------------------------------------------------------------

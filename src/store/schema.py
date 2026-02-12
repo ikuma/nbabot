@@ -376,6 +376,38 @@ def _ensure_fee_columns(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+# Order lifecycle columns (Phase O — order manager)
+_ORDER_LIFECYCLE_COLUMNS = [
+    ("order_placed_at", "TEXT"),
+    ("order_replace_count", "INTEGER DEFAULT 0"),
+    ("order_last_checked_at", "TEXT"),
+    ("order_original_price", "REAL"),
+]
+
+ORDER_EVENTS_SQL = """
+CREATE TABLE IF NOT EXISTS order_events (
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    signal_id         INTEGER NOT NULL REFERENCES signals(id),
+    event_type        TEXT NOT NULL,
+    order_id          TEXT,
+    price             REAL,
+    best_ask_at_event REAL,
+    created_at        TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_order_events_signal ON order_events(signal_id);
+"""
+
+
+def _ensure_order_lifecycle_columns(conn: sqlite3.Connection) -> None:
+    """Add order lifecycle columns to signals and create order_events table."""
+    existing = {row[1] for row in conn.execute("PRAGMA table_info(signals)").fetchall()}
+    for col_name, col_def in _ORDER_LIFECYCLE_COLUMNS:
+        if col_name not in existing:
+            conn.execute(f"ALTER TABLE signals ADD COLUMN {col_name} {col_def}")
+    conn.executescript(ORDER_EVENTS_SQL)
+    conn.commit()
+
+
 LLM_ANALYSES_SQL = """
 CREATE TABLE IF NOT EXISTS llm_analyses (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -469,6 +501,7 @@ def _connect(db_path: Path | str = DEFAULT_DB_PATH) -> sqlite3.Connection:
     _ensure_bothside_columns(conn)
     _ensure_merge_columns(conn)
     _ensure_fee_columns(conn)
+    _ensure_order_lifecycle_columns(conn)
     _ensure_risk_tables(conn)
     _ensure_llm_analyses_table(conn)
     _ensure_indexes(conn)
