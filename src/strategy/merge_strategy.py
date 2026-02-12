@@ -81,6 +81,8 @@ def should_merge(
     merge_amount: float,
     s: Settings,
     gas_cost_usd: float = 0.0,
+    capital_release_benefit_usd: float | None = None,
+    additional_fee_usd: float | None = None,
     is_eoa: bool = True,
     is_supported_wallet: bool | None = None,
 ) -> tuple[bool, str]:
@@ -104,6 +106,16 @@ def should_merge(
 
     if merge_amount <= 0:
         return False, "no_mergeable_shares"
+
+    if capital_release_benefit_usd is not None:
+        fee_cmp = additional_fee_usd if additional_fee_usd is not None else gas_cost_usd
+        if capital_release_benefit_usd <= fee_cmp:
+            return (
+                False,
+                "capital_release_benefit"
+                f"=${capital_release_benefit_usd:.4f}"
+                f"<=fee=${fee_cmp:.4f}",
+            )
 
     gross_profit = merge_amount * (1.0 - combined_vwap)
     net_profit = gross_profit - gas_cost_usd

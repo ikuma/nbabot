@@ -216,3 +216,29 @@ class TestShouldMerge:
         ok, reason = should_merge(0.998, 100.0, s, gas_cost_usd=0.15)
         assert ok is False
         assert "net_profit" in reason
+
+    def test_early_partial_benefit_guard_blocks(self):
+        s = self._settings()
+        ok, reason = should_merge(
+            0.90,
+            100.0,
+            s,
+            gas_cost_usd=0.01,
+            capital_release_benefit_usd=0.04,
+            additional_fee_usd=0.05,
+        )
+        assert ok is False
+        assert "capital_release_benefit" in reason
+
+    def test_early_partial_benefit_guard_allows(self):
+        s = self._settings()
+        ok, reason = should_merge(
+            0.90,
+            100.0,
+            s,
+            gas_cost_usd=0.01,
+            capital_release_benefit_usd=0.10,
+            additional_fee_usd=0.05,
+        )
+        assert ok is True
+        assert reason == "ok"

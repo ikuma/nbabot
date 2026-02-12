@@ -76,6 +76,10 @@ CREATE TABLE IF NOT EXISTS merge_operations (
     gross_profit_usd    REAL,
     gas_cost_usd        REAL,
     net_profit_usd      REAL,
+    early_partial       INTEGER NOT NULL DEFAULT 0,
+    capital_release_benefit_usd REAL,
+    additional_fee_usd  REAL,
+    execution_stage     TEXT NOT NULL DEFAULT 'post_dca',
     status              TEXT NOT NULL DEFAULT 'pending',
     tx_hash             TEXT,
     error_message       TEXT,
@@ -258,6 +262,13 @@ _MERGE_JOB_COLUMNS = [
     ("merge_operation_id", "INTEGER"),
 ]
 
+_MERGE_OPERATION_COLUMNS = [
+    ("early_partial", "INTEGER NOT NULL DEFAULT 0"),
+    ("capital_release_benefit_usd", "REAL"),
+    ("additional_fee_usd", "REAL"),
+    ("execution_stage", "TEXT NOT NULL DEFAULT 'post_dca'"),
+]
+
 
 def _ensure_merge_columns(conn: sqlite3.Connection) -> None:
     """Add MERGE columns to signals and trade_jobs, and create merge_operations table."""
@@ -275,6 +286,12 @@ def _ensure_merge_columns(conn: sqlite3.Connection) -> None:
             conn.execute(f"ALTER TABLE trade_jobs ADD COLUMN {col_name} {col_def}")
 
     conn.executescript(MERGE_OPERATIONS_SQL)
+    mop_existing = {
+        row[1] for row in conn.execute("PRAGMA table_info(merge_operations)").fetchall()
+    }
+    for col_name, col_def in _MERGE_OPERATION_COLUMNS:
+        if col_name not in mop_existing:
+            conn.execute(f"ALTER TABLE merge_operations ADD COLUMN {col_name} {col_def}")
     conn.commit()
 
     # Backfill: 既存 merge_operations から per-signal merge データを復元

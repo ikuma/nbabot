@@ -12,8 +12,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from src.store.db import (
     _connect,
     get_capital_turnover_inputs,
+    get_merge_candidate_groups,
     get_merge_eligible_groups,
     get_merge_operation,
+    get_recent_early_partial_merge_stats,
     log_merge_operation,
     log_signal,
     update_job_bothside,
@@ -103,6 +105,8 @@ class TestMergeOperationsTable:
         assert op.combined_vwap == pytest.approx(0.85)
         assert op.status == "pending"
         assert op.remainder_side == "directional"
+        assert op.early_partial == 0
+        assert op.execution_stage == "post_dca"
 
     def test_get_nonexistent(self, db_path):
         """Nonexistent group should return None."""
@@ -323,6 +327,107 @@ class TestMergeEligibleGroups:
 
         eligible = get_merge_eligible_groups(db_path=db_path)
         assert len(eligible) == 0
+
+    def test_candidate_groups_include_dca_active_when_enabled(self, db_path):
+        """Early-partial mode: executed + dca_active pair should be returned."""
+        dir_id, _ = self._setup_bothside_jobs(db_path, bs_gid="bs-group-early")
+
+        conn = _connect(db_path)
+        hedge_row = conn.execute(
+            "SELECT id FROM trade_jobs WHERE bothside_group_id = ? AND job_side = 'hedge'",
+            ("bs-group-early",),
+        ).fetchone()
+        hedge_id = hedge_row[0]
+        conn.close()
+
+        update_job_status(hedge_id, "dca_active", db_path=db_path)
+
+        rows = get_merge_candidate_groups(include_dca_active=True, db_path=db_path)
+        assert len(rows) == 1
+        row = rows[0]
+        assert row["bothside_group_id"] == "bs-group-early"
+        assert row["dir_id"] == dir_id
+        assert row["hedge_id"] == hedge_id
+        assert row["dir_status"] == "executed"
+        assert row["hedge_status"] == "dca_active"
+
+    def test_candidate_groups_exclude_dca_active_when_disabled(self, db_path):
+        """Legacy mode: executed + dca_active should be excluded."""
+        _, _ = self._setup_bothside_jobs(db_path, bs_gid="bs-group-legacy")
+        conn = _connect(db_path)
+        hedge_row = conn.execute(
+            "SELECT id FROM trade_jobs WHERE bothside_group_id = ? AND job_side = 'hedge'",
+            ("bs-group-legacy",),
+        ).fetchone()
+        hedge_id = hedge_row[0]
+        conn.close()
+        update_job_status(hedge_id, "dca_active", db_path=db_path)
+
+        rows = get_merge_candidate_groups(include_dca_active=False, db_path=db_path)
+        assert rows == []
+
+
+class TestEarlyPartialStats:
+    def test_recent_early_partial_stats(self, db_path):
+        log_merge_operation(
+            bothside_group_id="bs-e1",
+            condition_id="c1",
+            event_slug="slug1",
+            dir_shares=10.0,
+            hedge_shares=10.0,
+            merge_amount=10.0,
+            remainder_shares=0.0,
+            remainder_side=None,
+            dir_vwap=0.4,
+            hedge_vwap=0.5,
+            combined_vwap=0.9,
+            net_profit_usd=1.0,
+            early_partial=True,
+            execution_stage="early_partial",
+            status="simulated",
+            db_path=db_path,
+        )
+        log_merge_operation(
+            bothside_group_id="bs-e2",
+            condition_id="c2",
+            event_slug="slug2",
+            dir_shares=10.0,
+            hedge_shares=10.0,
+            merge_amount=10.0,
+            remainder_shares=0.0,
+            remainder_side=None,
+            dir_vwap=0.4,
+            hedge_vwap=0.5,
+            combined_vwap=0.9,
+            net_profit_usd=-0.5,
+            early_partial=True,
+            execution_stage="early_partial",
+            status="simulated",
+            db_path=db_path,
+        )
+        log_merge_operation(
+            bothside_group_id="bs-normal",
+            condition_id="c3",
+            event_slug="slug3",
+            dir_shares=10.0,
+            hedge_shares=10.0,
+            merge_amount=10.0,
+            remainder_shares=0.0,
+            remainder_side=None,
+            dir_vwap=0.4,
+            hedge_vwap=0.5,
+            combined_vwap=0.9,
+            net_profit_usd=9.9,
+            early_partial=False,
+            execution_stage="post_dca",
+            status="simulated",
+            db_path=db_path,
+        )
+
+        stats = get_recent_early_partial_merge_stats(limit=10, db_path=db_path)
+        assert stats["count"] == 2
+        assert stats["sum_net_profit_usd"] == pytest.approx(0.5)
+        assert stats["avg_net_profit_usd"] == pytest.approx(0.25)
 
 
 class TestMergeJobColumns:

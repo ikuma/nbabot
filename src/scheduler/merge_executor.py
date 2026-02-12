@@ -5,13 +5,76 @@ Extracted from src/scheduler/trade_scheduler.py — process_merge_eligible.
 
 from __future__ import annotations
 
+import hashlib
 import logging
+from datetime import datetime, timezone
 
 from src.config import settings
 from src.scheduler.job_executor import JobResult
 from src.store.db import DEFAULT_DB_PATH
 
 logger = logging.getLogger(__name__)
+
+
+def _in_rollout_cohort(bothside_group_id: str, rollout_pct: int) -> bool:
+    """Deterministic cohort gating for phased rollout."""
+    if rollout_pct >= 100:
+        return True
+    if rollout_pct <= 0:
+        return False
+    h = hashlib.sha1(bothside_group_id.encode("utf-8")).hexdigest()
+    bucket = int(h[:8], 16) % 100
+    return bucket < rollout_pct
+
+
+def _parse_iso8601(ts: str) -> datetime | None:
+    if not ts:
+        return None
+    try:
+        return datetime.fromisoformat(ts.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def _estimate_capital_release_benefit_usd(
+    merge_amount: float,
+    combined_vwap: float,
+    execute_before: str,
+) -> float:
+    """Estimate benefit from releasing principal before normal resolution."""
+    released_principal = max(merge_amount * combined_vwap, 0.0)
+    if released_principal <= 0:
+        return 0.0
+
+    now = datetime.now(timezone.utc)
+    tipoff = _parse_iso8601(execute_before)
+    hours_to_tipoff = 0.0
+    if tipoff is not None:
+        hours_to_tipoff = max((tipoff - now).total_seconds() / 3600.0, 0.0)
+    horizon = hours_to_tipoff + max(settings.merge_early_partial_post_tipoff_hours, 0.0)
+    return released_principal * settings.merge_early_partial_capital_rate_per_hour * horizon
+
+
+def _early_partial_guardrail_ok(db_path: str) -> tuple[bool, str]:
+    """Guardrail based on recent early-partial performance."""
+    from src.store.db import get_recent_early_partial_merge_stats
+
+    stats = get_recent_early_partial_merge_stats(
+        limit=settings.merge_early_partial_guard_lookback,
+        db_path=db_path,
+    )
+    count = int(stats.get("count", 0))
+    avg_net = float(stats.get("avg_net_profit_usd", 0.0))
+
+    if count < settings.merge_early_partial_guard_min_samples:
+        return True, f"insufficient_samples={count}"
+    if avg_net < settings.merge_early_partial_guard_min_avg_net_profit_usd:
+        return (
+            False,
+            "guardrail_avg_net"
+            f"={avg_net:.4f}<min={settings.merge_early_partial_guard_min_avg_net_profit_usd:.4f}",
+        )
+    return True, "ok"
 
 
 def _update_per_signal_merge_data(
@@ -67,7 +130,7 @@ def process_merge_eligible(
     from src.connectors.ctf import simulate_merge
     from src.store.db import (
         get_bothside_signals,
-        get_merge_eligible_groups,
+        get_merge_candidate_groups,
         log_merge_operation,
         update_job_merge_status,
         update_merge_operation,
@@ -83,20 +146,55 @@ def process_merge_eligible(
         return []
 
     path = db_path or DEFAULT_DB_PATH
-    eligible = get_merge_eligible_groups(db_path=path)
-    if not eligible:
+    candidates = get_merge_candidate_groups(
+        include_dca_active=settings.merge_early_partial_enabled,
+        db_path=path,
+    )
+    if not candidates:
         return []
 
-    logger.info("Found %d MERGE-eligible bothside group(s)", len(eligible))
+    logger.info("Found %d MERGE candidate group(s)", len(candidates))
 
     sig_type = settings.polymarket_signature_type
     is_eoa = sig_type == 0
     is_poly_proxy = sig_type == 1
     is_supported_wallet = is_eoa or is_poly_proxy
     results: list[JobResult] = []
+    early_partial_executed = 0
 
-    for bs_gid, dir_job_id, hedge_job_id in eligible:
+    for c in candidates:
+        bs_gid = c["bothside_group_id"]
+        dir_job_id = int(c["dir_id"])
+        hedge_job_id = int(c["hedge_id"])
+        dir_status = str(c["dir_status"])
+        hedge_status = str(c["hedge_status"])
+        execute_before = str(c.get("execute_before") or "")
+        is_early_partial = dir_status == "dca_active" or hedge_status == "dca_active"
+
         try:
+            if is_early_partial:
+                if not settings.merge_early_partial_enabled:
+                    logger.debug("MERGE early skip %s: disabled", bs_gid[:8])
+                    continue
+                if early_partial_executed >= settings.merge_early_partial_max_per_tick:
+                    logger.info(
+                        "MERGE early skip %s: max_per_tick=%d reached",
+                        bs_gid[:8],
+                        settings.merge_early_partial_max_per_tick,
+                    )
+                    continue
+                if not _in_rollout_cohort(bs_gid, settings.merge_early_partial_rollout_pct):
+                    logger.debug(
+                        "MERGE early skip %s: rollout cohort %d%%",
+                        bs_gid[:8],
+                        settings.merge_early_partial_rollout_pct,
+                    )
+                    continue
+                guard_ok, guard_reason = _early_partial_guardrail_ok(path)
+                if not guard_ok:
+                    logger.warning("MERGE early skip %s: %s", bs_gid[:8], guard_reason)
+                    continue
+
             all_signals = get_bothside_signals(bs_gid, db_path=path)
             dir_signals = [s for s in all_signals if s.signal_role == "directional"]
             hedge_signals = [s for s in all_signals if s.signal_role == "hedge"]
@@ -133,12 +231,26 @@ def process_merge_eligible(
                     logger.warning("Gas estimation failed for %s", bs_gid[:8])
                     gas_cost_usd = 0.01  # フォールバック
 
+            additional_fee_usd = gas_cost_usd
+            capital_release_benefit_usd = None
+            if is_early_partial:
+                if execution_mode != "live":
+                    additional_fee_usd = settings.merge_early_partial_assumed_fee_usd
+                capital_release_benefit_usd = _estimate_capital_release_benefit_usd(
+                    merge_amount=merge_amount,
+                    combined_vwap=combined_vwap,
+                    execute_before=execute_before,
+                )
+                additional_fee_usd += settings.merge_early_partial_min_benefit_over_fee_usd
+
             # MERGE 判定
             do_merge, reason = should_merge(
                 combined_vwap,
                 merge_amount,
                 settings,
                 gas_cost_usd=gas_cost_usd,
+                capital_release_benefit_usd=capital_release_benefit_usd,
+                additional_fee_usd=additional_fee_usd if is_early_partial else None,
                 is_eoa=is_eoa,
                 is_supported_wallet=is_supported_wallet,
             )
@@ -173,6 +285,10 @@ def process_merge_eligible(
                 gross_profit_usd=gross_profit,
                 gas_cost_usd=gas_cost_usd,
                 net_profit_usd=net_profit,
+                early_partial=is_early_partial,
+                capital_release_benefit_usd=capital_release_benefit_usd,
+                additional_fee_usd=additional_fee_usd if is_early_partial else gas_cost_usd,
+                execution_stage="early_partial" if is_early_partial else "post_dca",
                 status="pending",
                 db_path=path,
             )
@@ -209,12 +325,15 @@ def process_merge_eligible(
                         update_job_merge_status,
                     )
                     logger.info(
-                        "MERGE executed %s: %.2f shares, profit=$%.4f, tx=%s",
+                        "MERGE %s executed %s: %.2f shares, profit=$%.4f, tx=%s",
+                        "early" if is_early_partial else "post-dca",
                         bs_gid[:8],
                         merge_amount,
                         gross_profit - merge_result.gas_cost_usd,
                         merge_result.tx_hash[:16],
                     )
+                    if is_early_partial:
+                        early_partial_executed += 1
                 else:
                     update_merge_operation(
                         merge_id,
@@ -266,13 +385,16 @@ def process_merge_eligible(
                     update_job_merge_status,
                 )
                 logger.info(
-                    "[%s] MERGE simulated %s: %.2f shares, cvwap=%.4f, profit=$%.4f",
+                    "[%s] MERGE %s simulated %s: %.2f shares, cvwap=%.4f, profit=$%.4f",
                     execution_mode,
+                    "early" if is_early_partial else "post-dca",
                     bs_gid[:8],
                     merge_amount,
                     combined_vwap,
                     net_profit,
                 )
+                if is_early_partial:
+                    early_partial_executed += 1
 
             # 即時通知 (Phase N)
             try:

@@ -175,3 +175,7 @@ class MergeOperation:
     error_message: str | None
     created_at: str
     executed_at: str | None
+    early_partial: int = 0
+    capital_release_benefit_usd: float | None = None
+    additional_fee_usd: float | None = None
+    execution_stage: str = "post_dca"

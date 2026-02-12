@@ -123,6 +123,16 @@ class Settings(BaseSettings):
     merge_min_profit_usd: float = 0.10  # MERGE 利益最低額 (gas 負け防止)
     merge_gas_buffer_gwei: int = 50  # gas price 上限
     merge_max_retries: int = 3  # MERGE 失敗リトライ上限
+    merge_early_partial_enabled: bool = False  # DCA 完了前の条件付き部分 MERGE
+    merge_early_partial_assumed_fee_usd: float = 0.05  # paper/dry-run の追加 fee 仮定
+    merge_early_partial_capital_rate_per_hour: float = 0.0005  # 解放資本の時間価値
+    merge_early_partial_post_tipoff_hours: float = 3.0  # 解放効果の評価 horizon
+    merge_early_partial_min_benefit_over_fee_usd: float = 0.0  # benefit が fee を上回る最低差
+    merge_early_partial_rollout_pct: int = 25  # 段階ロールアウト比率
+    merge_early_partial_max_per_tick: int = 1  # 1 tick あたりの早期部分 MERGE 上限
+    merge_early_partial_guard_lookback: int = 20  # ガード用の直近サンプル数
+    merge_early_partial_guard_min_samples: int = 5  # ガード発動に必要な最小サンプル
+    merge_early_partial_guard_min_avg_net_profit_usd: float = -0.05  # 下回ったら停止
     merge_ctf_address: str = "0x4D97DCd97eC945f40cF65F87097ACe5EA0476045"
     merge_collateral_address: str = (
         "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"  # USDC.e on Polygon

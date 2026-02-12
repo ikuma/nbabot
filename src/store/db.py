@@ -812,6 +812,10 @@ def log_merge_operation(
     gross_profit_usd: float | None = None,
     gas_cost_usd: float | None = None,
     net_profit_usd: float | None = None,
+    early_partial: bool = False,
+    capital_release_benefit_usd: float | None = None,
+    additional_fee_usd: float | None = None,
+    execution_stage: str = "post_dca",
     status: str = "pending",
     tx_hash: str | None = None,
     error_message: str | None = None,
@@ -827,8 +831,9 @@ def log_merge_operation(
                 dir_shares, hedge_shares, merge_amount, remainder_shares,
                 remainder_side, dir_vwap, hedge_vwap, combined_vwap,
                 gross_profit_usd, gas_cost_usd, net_profit_usd,
+                early_partial, capital_release_benefit_usd, additional_fee_usd, execution_stage,
                 status, tx_hash, error_message, created_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 bothside_group_id,
                 condition_id,
@@ -844,6 +849,10 @@ def log_merge_operation(
                 gross_profit_usd,
                 gas_cost_usd,
                 net_profit_usd,
+                int(early_partial),
+                capital_release_benefit_usd,
+                additional_fee_usd,
+                execution_stage,
                 status,
                 tx_hash,
                 error_message,
@@ -852,6 +861,58 @@ def log_merge_operation(
         )
         conn.commit()
         return cur.lastrowid  # type: ignore[return-value]
+    finally:
+        conn.close()
+
+
+def get_merge_candidate_groups(
+    *,
+    include_dca_active: bool = False,
+    db_path: Path | str = DEFAULT_DB_PATH,
+) -> list[dict]:
+    """Get bothside groups eligible for merge evaluation with job statuses.
+
+    include_dca_active=False:
+      - both jobs must be executed (legacy behavior)
+
+    include_dca_active=True:
+      - each job can be executed or dca_active
+      - at least one side must be dca_active (early-partial candidate)
+      - legacy executed+executed candidates are also included
+    """
+    conn = _connect(db_path)
+    try:
+        if include_dca_active:
+            rows = conn.execute(
+                """SELECT d.bothside_group_id, d.id AS dir_id, h.id AS hedge_id,
+                          d.status AS dir_status, h.status AS hedge_status,
+                          d.execute_before AS execute_before, d.event_slug
+                   FROM trade_jobs d
+                   JOIN trade_jobs h ON d.bothside_group_id = h.bothside_group_id
+                   WHERE d.job_side = 'directional'
+                     AND h.job_side = 'hedge'
+                     AND d.status IN ('executed', 'dca_active')
+                     AND h.status IN ('executed', 'dca_active')
+                     AND d.bothside_group_id IS NOT NULL
+                     AND COALESCE(d.merge_status, 'none') = 'none'
+                   ORDER BY d.id ASC""",
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                """SELECT d.bothside_group_id, d.id AS dir_id, h.id AS hedge_id,
+                          d.status AS dir_status, h.status AS hedge_status,
+                          d.execute_before AS execute_before, d.event_slug
+                   FROM trade_jobs d
+                   JOIN trade_jobs h ON d.bothside_group_id = h.bothside_group_id
+                   WHERE d.job_side = 'directional'
+                     AND h.job_side = 'hedge'
+                     AND d.status = 'executed'
+                     AND h.status = 'executed'
+                     AND d.bothside_group_id IS NOT NULL
+                     AND COALESCE(d.merge_status, 'none') = 'none'
+                   ORDER BY d.id ASC""",
+            ).fetchall()
+        return [dict(r) for r in rows]
     finally:
         conn.close()
 
@@ -931,6 +992,35 @@ def get_merge_eligible_groups(
                ORDER BY d.id ASC""",
         ).fetchall()
         return [(r[0], r[1], r[2]) for r in rows]
+    finally:
+        conn.close()
+
+
+def get_recent_early_partial_merge_stats(
+    *,
+    limit: int = 20,
+    db_path: Path | str = DEFAULT_DB_PATH,
+) -> dict:
+    """Get recent early-partial merge performance stats for guardrails."""
+    conn = _connect(db_path)
+    try:
+        rows = conn.execute(
+            """SELECT net_profit_usd
+               FROM merge_operations
+               WHERE early_partial = 1
+                 AND status IN ('executed', 'simulated')
+               ORDER BY id DESC
+               LIMIT ?""",
+            (limit,),
+        ).fetchall()
+        vals = [float(r[0]) for r in rows if r[0] is not None]
+        if not vals:
+            return {"count": 0, "avg_net_profit_usd": 0.0, "sum_net_profit_usd": 0.0}
+        return {
+            "count": len(vals),
+            "avg_net_profit_usd": sum(vals) / len(vals),
+            "sum_net_profit_usd": sum(vals),
+        }
     finally:
         conn.close()
 
