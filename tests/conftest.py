@@ -1,11 +1,22 @@
-"""Shared fixtures for nbabot tests."""
+"""Shared fixtures for nbabot tests.
+
+Helper functions (insert_signal, make_moneyline, etc.) are in tests/helpers.py.
+"""
 
 from __future__ import annotations
+
+from pathlib import Path
 
 import pytest
 
 from src.connectors.odds_api import BookmakerOdds, GameOdds, TeamOdds
 from src.connectors.polymarket import MoneylineMarket
+
+
+@pytest.fixture()
+def db_path(tmp_path: Path) -> Path:
+    """Temporary database path — each test gets an isolated SQLite file."""
+    return tmp_path / "test.db"
 
 
 @pytest.fixture()

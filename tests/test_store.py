@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+from tests.helpers import insert_signal as _insert_signal
 from src.store.db import (
     _calc_max_drawdown,
     _calc_sharpe,
@@ -16,33 +17,7 @@ from src.store.db import (
     get_performance,
     get_unsettled,
     log_result,
-    log_signal,
 )
-
-
-@pytest.fixture()
-def db_path(tmp_path: Path) -> Path:
-    """Temporary database path for each test."""
-    return tmp_path / "test_trades.db"
-
-
-def _insert_signal(db_path: Path, **overrides) -> int:
-    """Helper to insert a signal with defaults."""
-    defaults = {
-        "game_title": "Knicks vs Celtics",
-        "event_slug": "nba-nyk-bos-2026-02-08",
-        "team": "Boston Celtics",
-        "side": "BUY",
-        "poly_price": 0.55,
-        "book_prob": 0.65,
-        "edge_pct": 10.0,
-        "kelly_size": 50.0,
-        "token_id": "token_bos",
-        "bookmakers_count": 3,
-        "db_path": db_path,
-    }
-    defaults.update(overrides)
-    return log_signal(**defaults)
 
 
 class TestConnect:

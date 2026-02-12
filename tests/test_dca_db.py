@@ -6,52 +6,14 @@ from pathlib import Path
 
 import pytest
 
+from tests.helpers import insert_signal as _insert_signal, insert_trade_job as _insert_job
 from src.store.db import (
     _connect,
     get_dca_active_jobs,
     get_dca_group_signals,
     get_pending_dca_exposure,
-    log_signal,
     update_dca_job,
-    upsert_trade_job,
 )
-
-
-@pytest.fixture()
-def db_path(tmp_path: Path) -> Path:
-    return tmp_path / "test_dca.db"
-
-
-def _insert_signal(db_path: Path, **overrides) -> int:
-    defaults = {
-        "game_title": "Knicks vs Celtics",
-        "event_slug": "nba-nyk-bos-2026-02-08",
-        "team": "Celtics",
-        "side": "BUY",
-        "poly_price": 0.40,
-        "book_prob": 0.6,
-        "edge_pct": 5.0,
-        "kelly_size": 25.0,
-        "token_id": "tok123",
-        "db_path": db_path,
-    }
-    defaults.update(overrides)
-    return log_signal(**defaults)
-
-
-def _insert_job(db_path: Path, **overrides) -> None:
-    defaults = {
-        "game_date": "2026-02-10",
-        "event_slug": "nba-nyk-bos-2026-02-10",
-        "home_team": "Boston Celtics",
-        "away_team": "New York Knicks",
-        "game_time_utc": "2026-02-11T01:00:00+00:00",
-        "execute_after": "2026-02-10T17:00:00+00:00",
-        "execute_before": "2026-02-11T01:00:00+00:00",
-        "db_path": db_path,
-    }
-    defaults.update(overrides)
-    upsert_trade_job(**defaults)
 
 
 class TestDcaColumns:

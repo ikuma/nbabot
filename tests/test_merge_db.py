@@ -2,12 +2,9 @@
 
 from __future__ import annotations
 
-import sys
 from pathlib import Path
 
 import pytest
-
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from src.store.db import (
     _connect,
@@ -26,10 +23,6 @@ from src.store.db import (
     upsert_trade_job,
 )
 
-
-@pytest.fixture()
-def db_path(tmp_path):
-    return str(tmp_path / "test.db")
 
 
 class TestConditionIdColumn:

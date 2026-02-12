@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from src.connectors.polymarket import MoneylineMarket
+from tests.helpers import make_moneyline as _make_ml
 from src.strategy.calibration_curve import WinRateEstimate
 from src.strategy.calibration_scanner import (
     _calibration_kelly,
@@ -12,27 +12,6 @@ from src.strategy.calibration_scanner import (
     _ev_per_dollar,
     scan_calibration,
 )
-
-
-def _make_ml(
-    outcomes: list[str],
-    prices: list[float],
-    active: bool = True,
-    slug: str = "nba-nyk-bos-2026-02-08",
-    title: str = "Knicks vs Celtics",
-) -> MoneylineMarket:
-    return MoneylineMarket(
-        condition_id="cond1",
-        event_slug=slug,
-        event_title=title,
-        home_team="Boston Celtics",
-        away_team="New York Knicks",
-        outcomes=outcomes,
-        prices=prices,
-        token_ids=[f"token_{i}" for i in range(len(outcomes))],
-        sports_market_type="moneyline",
-        active=active,
-    )
 
 
 class TestCalibrationKelly:

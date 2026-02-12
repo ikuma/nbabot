@@ -6,54 +6,19 @@ from pathlib import Path
 
 import pytest
 
+from tests.helpers import insert_signal as _insert_signal, insert_trade_job
 from src.store.db import (
     _connect,
     get_bothside_signals,
     get_hedge_job_for_slug,
     has_signal_for_slug_and_side,
-    log_signal,
     update_job_bothside,
     upsert_hedge_job,
-    upsert_trade_job,
 )
 
 
-@pytest.fixture()
-def db_path(tmp_path: Path) -> Path:
-    return tmp_path / "test_bothside.db"
-
-
 def _insert_job(db_path: Path, job_side: str = "directional", **overrides) -> None:
-    defaults = {
-        "game_date": "2026-02-10",
-        "event_slug": "nba-nyk-bos-2026-02-10",
-        "home_team": "Boston Celtics",
-        "away_team": "New York Knicks",
-        "game_time_utc": "2026-02-11T01:00:00+00:00",
-        "execute_after": "2026-02-10T17:00:00+00:00",
-        "execute_before": "2026-02-11T01:00:00+00:00",
-        "job_side": job_side,
-        "db_path": db_path,
-    }
-    defaults.update(overrides)
-    upsert_trade_job(**defaults)
-
-
-def _insert_signal(db_path: Path, **overrides) -> int:
-    defaults = {
-        "game_title": "Knicks vs Celtics",
-        "event_slug": "nba-nyk-bos-2026-02-10",
-        "team": "Celtics",
-        "side": "BUY",
-        "poly_price": 0.40,
-        "book_prob": 0.6,
-        "edge_pct": 5.0,
-        "kelly_size": 25.0,
-        "token_id": "tok123",
-        "db_path": db_path,
-    }
-    defaults.update(overrides)
-    return log_signal(**defaults)
+    insert_trade_job(db_path, job_side=job_side, **overrides)
 
 
 class TestUniqueConstraint:
@@ -181,15 +146,15 @@ class TestGetBothsideSignals:
 
 class TestHasSignalForSlugAndSide:
     def test_detects_directional(self, db_path: Path):
-        _insert_signal(db_path, signal_role="directional")
-        assert has_signal_for_slug_and_side(
-            "nba-nyk-bos-2026-02-10", "directional", db_path=db_path
-        )
-        assert not has_signal_for_slug_and_side("nba-nyk-bos-2026-02-10", "hedge", db_path=db_path)
+        slug = "nba-nyk-bos-2026-02-10"
+        _insert_signal(db_path, event_slug=slug, signal_role="directional")
+        assert has_signal_for_slug_and_side(slug, "directional", db_path=db_path)
+        assert not has_signal_for_slug_and_side(slug, "hedge", db_path=db_path)
 
     def test_detects_hedge(self, db_path: Path):
-        _insert_signal(db_path, signal_role="hedge")
-        assert has_signal_for_slug_and_side("nba-nyk-bos-2026-02-10", "hedge", db_path=db_path)
+        slug = "nba-nyk-bos-2026-02-10"
+        _insert_signal(db_path, event_slug=slug, signal_role="hedge")
+        assert has_signal_for_slug_and_side(slug, "hedge", db_path=db_path)
 
 
 class TestUpdateJobBothside:

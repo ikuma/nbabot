@@ -415,20 +415,22 @@ Gamma Events API ──→ MoneylineMarket[] ──────────┤
 
 ## テスト
 
-- フレームワーク: pytest
+- フレームワーク: pytest + pytest-asyncio (`asyncio_mode = "auto"`)
 - テストファイル: `tests/` 配下、`test_*.py` 命名。
+- 共通 fixture: `conftest.py` (`db_path` 等)。共通ヘルパー: `tests/helpers.py` (`insert_signal`, `make_moneyline`, `insert_trade_job`)。
 - API 呼び出しはモック化。実 API テストは環境変数で明示的に有効化。
-- ロジック変更時は `pytest` を実行してからコミット。
+- pyproject.toml に `addopts = "-q --tb=short --strict-markers"` 設定済み。
+- `@pytest.mark.slow` マーカーで遅いテストを識別可能。`pytest -m "not slow"` で除外。
 
 ## コミット前チェック (必須)
 
 コミット前に以下を **必ず** 実行し、全パスを確認すること。失敗時はコミットせず修正する。
 
-1. **テスト**: `python -m pytest -q --tb=short` — 既知の 5 件 (`test_llm_analyzer.py` 内 asyncio 系) を超える失敗は回帰バグ。修正必須。
+1. **テスト**: `python -m pytest` — **全 639 テストが pass 必須。failure は 0 件がベースライン。**
 2. **リント**: `ruff check <変更したファイル>` — 自分が変更したファイルに新たな violation を残さない。
 3. **フォーマット**: `ruff format <変更したファイル>` — 変更ファイルのフォーマットを整える。
 
-pre-commit hook (`.git/hooks/pre-commit`) で pytest 回帰チェックが自動実行される。hook が BLOCKED を返したらコミットできない。
+pre-commit hook (`.git/hooks/pre-commit`) で pytest が自動実行される。1 件でも failure があればコミットがブロックされる。
 
 ## コミット規約
 

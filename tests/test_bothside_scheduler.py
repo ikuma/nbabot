@@ -18,10 +18,6 @@ from src.store.db import (
 from src.strategy.calibration_scanner import BothsideOpportunity, CalibrationOpportunity
 
 
-@pytest.fixture()
-def db_path(tmp_path: Path) -> Path:
-    return tmp_path / "test_sched.db"
-
 
 def _insert_job(db_path: Path, **overrides) -> int:
     defaults = {

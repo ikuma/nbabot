@@ -30,3 +30,8 @@ select = ["E", "F", "I", "N"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+asyncio_mode = "auto"
+addopts = "-q --tb=short --strict-markers"
+markers = [
+    "slow: marks tests as slow (deselect with '-m not slow')",
+]

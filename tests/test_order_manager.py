@@ -21,11 +21,6 @@ from src.store.db import (
 from src.store.models import OrderEvent, SignalRecord
 
 
-@pytest.fixture()
-def db_path(tmp_path: Path) -> Path:
-    """Temporary database path for each test."""
-    return tmp_path / "test_order_manager.db"
-
 
 def _make_signal(db_path: Path, event_slug: str = "nba-nyk-bos-2026-02-15", **kw) -> int:
     """Insert a signal with defaults and return its ID."""
