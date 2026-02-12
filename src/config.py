@@ -81,6 +81,8 @@ class Settings(BaseSettings):
     dca_favorable_price_pct: float = 0.0  # 初回価格以下なら favorable (前倒し購入)
     dca_unfavorable_price_pct: float = 10.0  # 10% 以上の上昇で unfavorable (先送り)
     dca_cutoff_before_tipoff_min: int = 30  # ティップオフ N 分前で DCA 打ち切り
+    dca_per_entry_cap_mult: float = 2.0  # DCA per-entry cap = (remaining/entries) × mult
+    dca_min_order_usd: float = 1.0  # DCA minimum order size (USD), below → skip
 
     # === Both-Side Betting (Phase B) ===
     bothside_enabled: bool = True  # 両サイド購入はデフォルト有効 (利益の核心)

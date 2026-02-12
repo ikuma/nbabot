@@ -318,16 +318,27 @@ def get_todays_exposure(
 def get_pending_dca_exposure(db_path: Path | str = DEFAULT_DB_PATH) -> float:
     """Sum of planned but not-yet-placed DCA exposure.
 
-    For each dca_active job: (dca_max_entries - dca_entries_count) * dca_slice_size
+    Target-holding (Phase DCA2): remaining = total_budget - SUM(kelly_size).
+    Legacy fallback: (dca_max_entries - dca_entries_count) * dca_slice_size.
     """
     conn = _connect(db_path)
     try:
         row = conn.execute(
-            """SELECT COALESCE(SUM(
-                (dca_max_entries - dca_entries_count) * dca_slice_size
-            ), 0) FROM trade_jobs
-            WHERE status = 'dca_active'
-              AND dca_slice_size > 0""",
+            """SELECT COALESCE(SUM(remaining), 0) FROM (
+                SELECT CASE
+                    WHEN tj.dca_total_budget IS NOT NULL AND tj.dca_total_budget > 0 THEN
+                        tj.dca_total_budget - COALESCE(
+                            (SELECT SUM(s.kelly_size) FROM signals s
+                             WHERE s.dca_group_id = tj.dca_group_id), 0)
+                    ELSE
+                        (tj.dca_max_entries - tj.dca_entries_count)
+                        * COALESCE(tj.dca_slice_size, 0)
+                END AS remaining
+                FROM trade_jobs tj
+                WHERE tj.status = 'dca_active'
+                  AND (tj.dca_total_budget > 0
+                       OR COALESCE(tj.dca_slice_size, 0) > 0)
+            )""",
         ).fetchone()
         return float(row[0])
     finally:

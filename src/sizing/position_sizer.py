@@ -109,6 +109,102 @@ def calculate_dca_budget(
 
 
 @dataclass
+class TargetOrderResult:
+    """Result of target-holding DCA order size calculation."""
+
+    order_size_usd: float  # 今回の発注額
+    raw_gap: float  # target_budget - mark_to_market_value
+    remaining_budget: float  # total_budget - total_cost
+    per_entry_cap: float  # (remaining / remaining_entries) * cap_mult
+    completion_reason: str | None  # None | "budget_exhausted" | "target_reached"
+
+
+def calculate_target_order_size(
+    total_budget: float,
+    costs: list[float],
+    prices: list[float],
+    current_price: float,
+    max_entries: int,
+    entries_done: int,
+    cap_mult: float = 2.0,
+    min_order_usd: float = 1.0,
+) -> TargetOrderResult:
+    """Calculate DCA order size using mark-to-market gap fill.
+
+    Instead of equal slices, sizes each entry based on the gap between
+    target budget and current mark-to-market value of existing holdings.
+
+    Args:
+        total_budget: Total DCA budget (sum of all entries).
+        costs: Cost (kelly_size) of each existing entry.
+        prices: Buy price of each existing entry.
+        current_price: Current market price.
+        max_entries: Maximum number of DCA entries.
+        entries_done: Number of entries already executed.
+        cap_mult: Per-entry cap multiplier (safety valve).
+        min_order_usd: Minimum order size; below this → skip/complete.
+    """
+    total_cost = sum(costs)
+    remaining_budget = max(total_budget - total_cost, 0.0)
+
+    # 予算使い切り判定
+    if remaining_budget < min_order_usd:
+        return TargetOrderResult(
+            order_size_usd=0.0,
+            raw_gap=0.0,
+            remaining_budget=remaining_budget,
+            per_entry_cap=0.0,
+            completion_reason="budget_exhausted",
+        )
+
+    # 保有シェアの時価評価
+    total_shares = 0.0
+    for cost, price in zip(costs, prices):
+        if price > 0:
+            total_shares += cost / price
+    current_value = total_shares * current_price if current_price > 0 else 0.0
+
+    # 目標との乖離 (gap)
+    raw_gap = max(total_budget - current_value, 0.0)
+
+    # 目標到達判定
+    if raw_gap < min_order_usd:
+        return TargetOrderResult(
+            order_size_usd=0.0,
+            raw_gap=raw_gap,
+            remaining_budget=remaining_budget,
+            per_entry_cap=0.0,
+            completion_reason="target_reached",
+        )
+
+    # Per-entry cap = (remaining / remaining_entries) * cap_mult
+    remaining_entries = max(max_entries - entries_done, 1)
+    per_entry_cap = (remaining_budget / remaining_entries) * cap_mult
+
+    # 3 制約の最小値
+    order_size = min(raw_gap, remaining_budget, per_entry_cap)
+    order_size = round(max(order_size, 0.0), 2)
+
+    # 最小注文額チェック
+    if order_size < min_order_usd:
+        return TargetOrderResult(
+            order_size_usd=0.0,
+            raw_gap=raw_gap,
+            remaining_budget=remaining_budget,
+            per_entry_cap=per_entry_cap,
+            completion_reason="budget_exhausted",
+        )
+
+    return TargetOrderResult(
+        order_size_usd=order_size,
+        raw_gap=round(raw_gap, 2),
+        remaining_budget=round(remaining_budget, 2),
+        per_entry_cap=round(per_entry_cap, 2),
+        completion_reason=None,
+    )
+
+
+@dataclass
 class SizingResult:
     """Result of position sizing with constraint attribution."""
 

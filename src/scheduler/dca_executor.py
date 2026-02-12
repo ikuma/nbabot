@@ -193,8 +193,33 @@ def process_dca_active_jobs(
             dca_config.max_entries,
         )
 
-        # サイジング: 事前計算済みスライスサイズを使用 (フォールバック: 初回の kelly_size)
-        dca_size = job.dca_slice_size if job.dca_slice_size else first_signal.kelly_size
+        # サイジング: target-holding 方式 (Phase DCA2)
+        total_budget = job.dca_total_budget
+        target_result = None
+        if total_budget and total_budget > 0:
+            from src.sizing.position_sizer import calculate_target_order_size
+
+            target_result = calculate_target_order_size(
+                total_budget=total_budget,
+                costs=[s.kelly_size for s in signals],
+                prices=[s.fill_price or s.poly_price for s in signals],
+                current_price=current_price,
+                max_entries=job.dca_max_entries,
+                entries_done=len(signals),
+                cap_mult=settings.dca_per_entry_cap_mult,
+                min_order_usd=settings.dca_min_order_usd,
+            )
+            dca_size = target_result.order_size_usd
+            if dca_size <= 0:
+                if target_result.completion_reason:
+                    update_dca_job(job.id, status="executed", db_path=path)
+                    logger.info(
+                        "Job %d: DCA %s → executed", job.id, target_result.completion_reason
+                    )
+                continue
+        else:
+            # dca_total_budget が NULL の旧データ: equal split フォールバック
+            dca_size = job.dca_slice_size if job.dca_slice_size else first_signal.kelly_size
 
         if execution_mode == "dry-run":
             logger.info(
@@ -321,7 +346,13 @@ def process_dca_active_jobs(
 
         # DCA カウント更新
         new_count = job.dca_entries_count + 1
-        new_status = "dca_active" if new_count < job.dca_max_entries else "executed"
+        # Target-holding: 3 条件で完了判定
+        if new_count >= job.dca_max_entries:
+            new_status = "executed"
+        elif target_result and target_result.completion_reason:
+            new_status = "executed"
+        else:
+            new_status = "dca_active"
         update_dca_job(
             job.id,
             dca_entries_count=new_count,

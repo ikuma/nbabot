@@ -562,6 +562,44 @@ Phase Q の連続校正カーブを活用し、2 つの残存問題を解決:
 
 ---
 
+## Phase DCA2: 目標保有量方式 DCA (Target-Holding DCA) ✅
+
+**目的**: 等分割 TWAP → Adaptive IS/Target Rebalancing への進化。価格が有利な時に厚く、不利な時に薄く (または停止) を自然に実現。
+
+**背景**: 旧 DCA は `slice_size = total_budget / max_entries` の等分割。価格が下がっても上がっても同額を投入するため、有利な価格での積み増し機会を逃していた。
+
+**設計 — Mark-to-Market Gap Fill**:
+```
+total_shares   = sum(cost / buy_price  for each existing entry)
+current_value  = total_shares * current_price          # 時価評価
+raw_gap        = max(0, total_budget - current_value)  # 目標との乖離
+remaining_budget = total_budget - total_cost            # 未消化予算
+remaining_entries = max(1, max_entries - entries_done)
+per_entry_cap  = (remaining_budget / remaining_entries) * cap_mult
+order_size     = min(raw_gap, remaining_budget, per_entry_cap)
+```
+
+**完了条件 (拡張)**:
+- `max_entries` 到達 (従来通り)
+- `budget_exhausted`: remaining_budget < min_order_usd
+- `target_reached`: raw_gap < min_order_usd
+
+**設定**:
+- `DCA_PER_ENTRY_CAP_MULT=2.0` — 1 回の発注上限 = 残余予算の等分 × この倍率
+- `DCA_MIN_ORDER_USD=1.0` — 最小発注額。これ未満はスキップ
+
+**実装**:
+- `src/sizing/position_sizer.py`: `TargetOrderResult` + `calculate_target_order_size()` 純関数
+- `src/scheduler/dca_executor.py`: 固定 slice → target-holding 動的サイジング
+- `src/store/db.py`: `get_pending_dca_exposure()` を signals 実績ベースに更新
+- `src/config.py`: `dca_per_entry_cap_mult`, `dca_min_order_usd` 追加
+- `tests/test_position_sizer.py`: 9 テスト追加
+- `tests/test_dca_db.py`: 3 テスト追加
+
+**旧データ互換性**: `dca_total_budget` が NULL の旧ジョブは equal-split フォールバック。
+
+---
+
 ## ウォレットセキュリティ
 - **Cold Wallet (70%)**: ハードウェアウォレット、手動のみ
 - **Hot Wallet (30%)**: BOT用、取引上限付き

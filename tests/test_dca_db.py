@@ -10,6 +10,7 @@ from src.store.db import (
     _connect,
     get_dca_active_jobs,
     get_dca_group_signals,
+    get_pending_dca_exposure,
     log_signal,
     update_dca_job,
     upsert_trade_job,
@@ -207,3 +208,54 @@ class TestUpdateDcaJob:
         conn.close()
         assert row[0] == 125.0
         assert row[1] == 25.0
+
+
+class TestGetPendingDcaExposure:
+    def test_target_holding_exposure(self, db_path: Path):
+        """Target-holding: remaining = total_budget - SUM(kelly_size)."""
+        _insert_job(db_path)
+        conn = _connect(db_path)
+        job_id = conn.execute("SELECT id FROM trade_jobs LIMIT 1").fetchone()[0]
+        conn.close()
+
+        update_dca_job(
+            job_id,
+            dca_entries_count=2,
+            dca_max_entries=5,
+            dca_group_id="grp-target",
+            dca_total_budget=100.0,
+            status="dca_active",
+            db_path=db_path,
+        )
+        # 2 signals totaling $35
+        _insert_signal(db_path, dca_group_id="grp-target", dca_sequence=1, kelly_size=20.0)
+        _insert_signal(db_path, dca_group_id="grp-target", dca_sequence=2, kelly_size=15.0)
+
+        exposure = get_pending_dca_exposure(db_path=db_path)
+        assert exposure == 65.0  # 100 - 35
+
+    def test_legacy_slice_exposure(self, db_path: Path):
+        """Legacy: (max_entries - count) * slice_size."""
+        _insert_job(db_path)
+        conn = _connect(db_path)
+        job_id = conn.execute("SELECT id FROM trade_jobs LIMIT 1").fetchone()[0]
+        conn.close()
+
+        update_dca_job(
+            job_id,
+            dca_entries_count=2,
+            dca_max_entries=5,
+            dca_group_id="grp-legacy",
+            dca_slice_size=10.0,
+            status="dca_active",
+            db_path=db_path,
+        )
+
+        exposure = get_pending_dca_exposure(db_path=db_path)
+        assert exposure == 30.0  # (5 - 2) * 10
+
+    def test_no_dca_active_returns_zero(self, db_path: Path):
+        """No dca_active jobs → 0."""
+        _connect(db_path).close()
+        exposure = get_pending_dca_exposure(db_path=db_path)
+        assert exposure == 0.0
