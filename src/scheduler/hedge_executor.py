@@ -264,7 +264,9 @@ def process_hedge_job(
 
         # サイジング (LLM hedge_ratio 適用: Phase L)
         kelly = _calibration_kelly(est.lower_bound, order_price)
-        hedge_mult = settings.bothside_hedge_kelly_mult
+        from src.strategy.hedge_ratio_runtime import resolve_hedge_kelly_mult
+
+        hedge_mult = resolve_hedge_kelly_mult(settings.bothside_hedge_kelly_mult)
         if settings.llm_analysis_enabled:
             from src.strategy.llm_cache import get_cached_analysis
 

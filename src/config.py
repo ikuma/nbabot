@@ -89,6 +89,8 @@ class Settings(BaseSettings):
     bothside_max_combined_vwap: float = 0.995  # combined > threshold なら MERGE しない
     bothside_target_combined: float = 0.97  # hedge 指値算出基準 (MERGE 利鞘 3%/share)
     bothside_hedge_kelly_mult: float = 0.5  # hedge 側 Kelly 乗数 (directional の半分)
+    bothside_hedge_ratio_mode: str = "static"  # "static" | "optimized"
+    bothside_hedge_ratio_file: str = "data/optimized/hedge_ratio.json"
     bothside_hedge_delay_min: int = 30  # directional 発注→ hedge 最小遅延 (分)
     bothside_hedge_max_price: float = 0.55  # hedge 価格上限 (sweet spot 上限と同値)
 

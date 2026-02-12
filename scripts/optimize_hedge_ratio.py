@@ -10,7 +10,9 @@ Example:
 from __future__ import annotations
 
 import argparse
+import json
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -32,6 +34,12 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Drawdown penalty coefficient in objective",
     )
     parser.add_argument("--top", type=int, default=5, help="Show top N ratios")
+    parser.add_argument(
+        "--write-json",
+        type=str,
+        default=None,
+        help="Optional path to save best ratio JSON for runtime consumption",
+    )
     return parser
 
 
@@ -96,6 +104,28 @@ def main() -> None:
             f"{ev.max_drawdown_usd:.2f}\t"
             f"{ev.avg_pnl_per_group_usd:+.2f}"
         )
+
+    if args.write_json:
+        out_path = Path(args.write_json)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+            "best_ratio": result.best_ratio,
+            "sample_count": result.sample_count,
+            "dd_penalty": args.dd_penalty,
+            "min_ratio": args.min_ratio,
+            "max_ratio": args.max_ratio,
+            "step": args.step,
+            "best_evaluation": {
+                "objective_score": result.best_evaluation.objective_score,
+                "total_pnl_usd": result.best_evaluation.total_pnl_usd,
+                "max_drawdown_usd": result.best_evaluation.max_drawdown_usd,
+                "avg_pnl_per_group_usd": result.best_evaluation.avg_pnl_per_group_usd,
+            },
+        }
+        out_path.write_text(json.dumps(payload, ensure_ascii=True, indent=2) + "\n")
+        print("")
+        print(f"Saved: {out_path}")
 
 
 if __name__ == "__main__":

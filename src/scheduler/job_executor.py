@@ -212,7 +212,9 @@ def process_single_job(
         llm_analysis = None
         home_short = ""
         effective_sizing = sizing_multiplier
-        effective_hedge_mult = settings.bothside_hedge_kelly_mult
+        from src.strategy.hedge_ratio_runtime import resolve_hedge_kelly_mult
+
+        effective_hedge_mult = resolve_hedge_kelly_mult(settings.bothside_hedge_kelly_mult)
 
         if settings.llm_analysis_enabled and job.job_side == "directional":
             try:
@@ -269,7 +271,7 @@ def process_single_job(
                 balance_usd=balance_usd,
                 liquidity_map=liquidity_map,
                 max_combined_vwap=settings.bothside_max_combined_vwap,
-                hedge_kelly_mult=settings.bothside_hedge_kelly_mult,
+                hedge_kelly_mult=effective_hedge_mult,
                 hedge_max_price=settings.bothside_hedge_max_price,
             )
             if bothside_results:
