@@ -10,8 +10,11 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from src.analysis.metrics import (
+    CapitalTurnoverInput,
     DecomposedMetrics,
+    compute_capital_turnover_metrics,
     compute_decomposed_metrics,
+    format_capital_turnover_summary,
     format_decomposed_summary,
 )
 from src.store.models import ResultRecord, SignalRecord
@@ -185,3 +188,63 @@ class TestFormatDecomposedSummary:
         assert "Game W/L: 3/2" in s
         assert "Profit W/L: 4/1" in s
         assert "Merged: 2" in s
+
+
+class TestCapitalTurnoverMetrics:
+    def test_empty(self):
+        m = compute_capital_turnover_metrics([])
+        assert m.groups_count == 0
+        assert m.total_merge_net_pnl_usd == 0.0
+        assert m.capital_turnover_ratio == 0.0
+
+    def test_basic_aggregation(self):
+        inputs = [
+            CapitalTurnoverInput(
+                bothside_group_id="bs-1",
+                merge_amount=100.0,
+                combined_vwap=0.95,
+                gas_cost_usd=0.5,
+                net_profit_usd=4.5,
+                first_entry_at="2026-02-01T00:00:00+00:00",
+                released_at="2026-02-01T10:00:00+00:00",
+            ),
+            CapitalTurnoverInput(
+                bothside_group_id="bs-2",
+                merge_amount=50.0,
+                combined_vwap=0.90,
+                gas_cost_usd=0.2,
+                net_profit_usd=4.8,
+                first_entry_at="2026-02-01T02:00:00+00:00",
+                released_at="2026-02-01T12:00:00+00:00",
+            ),
+        ]
+        m = compute_capital_turnover_metrics(inputs)
+
+        assert m.groups_count == 2
+        assert m.total_merge_net_pnl_usd == pytest.approx(9.3)
+        assert m.total_released_usd == pytest.approx(149.3)
+        assert m.total_released_principal_usd == pytest.approx(140.0)
+        assert m.avg_lock_hours_weighted == pytest.approx(10.0)
+        assert m.analysis_period_hours == pytest.approx(12.0)
+        assert m.avg_locked_capital_usd == pytest.approx(116.67, abs=0.01)
+        assert m.capital_turnover_ratio == pytest.approx(1.28, abs=0.01)
+        assert m.profit_opportunity_cycles == pytest.approx(m.capital_turnover_ratio)
+
+    def test_format_summary(self):
+        m = compute_capital_turnover_metrics(
+            [
+                CapitalTurnoverInput(
+                    bothside_group_id="bs-1",
+                    merge_amount=10.0,
+                    combined_vwap=0.95,
+                    gas_cost_usd=0.1,
+                    net_profit_usd=0.4,
+                    first_entry_at="2026-02-01T00:00:00+00:00",
+                    released_at="2026-02-01T02:00:00+00:00",
+                )
+            ]
+        )
+        s = format_capital_turnover_summary(m)
+        assert "MERGE net=$+0.40" in s
+        assert "Released=$9.90" in s
+        assert "Avg lock=2.0h" in s

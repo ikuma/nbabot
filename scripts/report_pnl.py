@@ -16,7 +16,17 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 def generate_report(save: bool = False) -> str:
     """Generate paper-trade performance report as markdown."""
-    from src.store.db import get_all_results, get_all_signals, get_performance
+    from src.analysis.metrics import (
+        CapitalTurnoverInput,
+        compute_capital_turnover_metrics,
+        format_capital_turnover_summary,
+    )
+    from src.store.db import (
+        get_all_results,
+        get_all_signals,
+        get_capital_turnover_inputs,
+        get_performance,
+    )
 
     stats = get_performance()
     signals = get_all_signals()
@@ -43,6 +53,43 @@ def generate_report(save: bool = False) -> str:
     lines.append(f"| Max drawdown | ${stats.max_drawdown:.2f} |")
     lines.append(f"| Sharpe ratio | {stats.sharpe_ratio:.2f} |")
     lines.append("")
+
+    # --- Capital Turnover (Phase 1) ---
+    turnover_rows = get_capital_turnover_inputs()
+    turnover_inputs = [
+        CapitalTurnoverInput(
+            bothside_group_id=str(r.get("bothside_group_id", "")),
+            merge_amount=float(r.get("merge_amount", 0.0)),
+            combined_vwap=float(r.get("combined_vwap", 0.0)),
+            gas_cost_usd=float(r.get("gas_cost_usd", 0.0)),
+            net_profit_usd=float(r.get("net_profit_usd", 0.0)),
+            first_entry_at=str(r.get("first_entry_at", "")),
+            released_at=str(r.get("released_at", "")),
+        )
+        for r in turnover_rows
+    ]
+    turnover = compute_capital_turnover_metrics(turnover_inputs)
+
+    lines.append("## Capital Turnover (MERGE)\n")
+    if turnover.groups_count == 0:
+        lines.append("No executed/simulated MERGE records yet.\n")
+    else:
+        lines.append("| Metric | Value |")
+        lines.append("|--------|-------|")
+        lines.append(f"| Groups | {turnover.groups_count} |")
+        lines.append(f"| MERGE net PnL | ${turnover.total_merge_net_pnl_usd:+.2f} |")
+        lines.append(f"| Released capital | ${turnover.total_released_usd:.2f} |")
+        lines.append(
+            "| Released principal (cost basis) | "
+            f"${turnover.total_released_principal_usd:.2f} |"
+        )
+        lines.append(f"| Avg lock hours (weighted) | {turnover.avg_lock_hours_weighted:.2f}h |")
+        lines.append(f"| Avg locked capital | ${turnover.avg_locked_capital_usd:.2f} |")
+        lines.append(f"| Capital turnover ratio | {turnover.capital_turnover_ratio:.3f}x |")
+        lines.append(f"| Profit opportunity cycles | {turnover.profit_opportunity_cycles:.3f} |")
+        lines.append("")
+        lines.append(f"Summary: {format_capital_turnover_summary(turnover)}")
+        lines.append("")
 
     # --- Phase 3 Readiness ---
     lines.append("## Phase 3 Readiness Checklist\n")

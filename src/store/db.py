@@ -874,6 +874,44 @@ def get_merge_operation(
         conn.close()
 
 
+def get_capital_turnover_inputs(
+    db_path: Path | str = DEFAULT_DB_PATH,
+) -> list[dict]:
+    """Get MERGE-capital-turnover inputs with timing and sizing context.
+
+    Returns one row per executed/simulated merge operation:
+    - bothside_group_id
+    - merge_amount, combined_vwap, gas_cost_usd, net_profit_usd
+    - first_entry_at (earliest signal.created_at in group)
+    - released_at (executed_at if present, else created_at)
+    - group_cost_usd (sum of kelly_size in the group)
+    """
+    conn = _connect(db_path)
+    try:
+        rows = conn.execute(
+            """SELECT
+                 mo.bothside_group_id,
+                 mo.merge_amount,
+                 mo.combined_vwap,
+                 COALESCE(mo.gas_cost_usd, 0.0) AS gas_cost_usd,
+                 COALESCE(
+                    mo.net_profit_usd,
+                    mo.merge_amount * (1.0 - mo.combined_vwap) - COALESCE(mo.gas_cost_usd, 0.0)
+                 ) AS net_profit_usd,
+                 COALESCE(MIN(s.created_at), mo.created_at) AS first_entry_at,
+                 COALESCE(mo.executed_at, mo.created_at) AS released_at,
+                 COALESCE(SUM(s.kelly_size), 0.0) AS group_cost_usd
+               FROM merge_operations mo
+               LEFT JOIN signals s ON s.bothside_group_id = mo.bothside_group_id
+               WHERE mo.status IN ('executed', 'simulated')
+               GROUP BY mo.id
+               ORDER BY mo.id ASC""",
+        ).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        conn.close()
+
+
 def get_merge_eligible_groups(
     db_path: Path | str = DEFAULT_DB_PATH,
 ) -> list[tuple[str, int, int]]:

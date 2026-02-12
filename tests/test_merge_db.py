@@ -11,6 +11,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from src.store.db import (
     _connect,
+    get_capital_turnover_inputs,
     get_merge_eligible_groups,
     get_merge_operation,
     log_merge_operation,
@@ -141,6 +142,86 @@ class TestMergeOperationsTable:
         assert op.tx_hash == "0xdeadbeef"
         assert op.executed_at is not None
         assert op.net_profit_usd == pytest.approx(7.495)
+
+
+class TestCapitalTurnoverInputs:
+    def test_returns_merge_rows_with_timing_and_cost(self, db_path):
+        bs_gid = "bs-turnover-1"
+
+        s1 = log_signal(
+            game_title="Test Game",
+            event_slug="nba-nyk-bos-2026-02-10",
+            team="Celtics",
+            side="BUY",
+            poly_price=0.40,
+            book_prob=0.6,
+            edge_pct=5.0,
+            kelly_size=25.0,
+            token_id="tok1",
+            bothside_group_id=bs_gid,
+            signal_role="directional",
+            db_path=db_path,
+        )
+        s2 = log_signal(
+            game_title="Test Game",
+            event_slug="nba-nyk-bos-2026-02-10",
+            team="Knicks",
+            side="BUY",
+            poly_price=0.50,
+            book_prob=0.5,
+            edge_pct=3.0,
+            kelly_size=20.0,
+            token_id="tok2",
+            bothside_group_id=bs_gid,
+            signal_role="hedge",
+            db_path=db_path,
+        )
+
+        merge_id = log_merge_operation(
+            bothside_group_id=bs_gid,
+            condition_id="0xcond-turnover",
+            event_slug="nba-nyk-bos-2026-02-10",
+            dir_shares=60.0,
+            hedge_shares=50.0,
+            merge_amount=50.0,
+            remainder_shares=10.0,
+            remainder_side="directional",
+            dir_vwap=0.40,
+            hedge_vwap=0.50,
+            combined_vwap=0.90,
+            gas_cost_usd=0.2,
+            net_profit_usd=4.8,
+            status="executed",
+            db_path=db_path,
+        )
+
+        conn = _connect(db_path)
+        conn.execute(
+            "UPDATE signals SET created_at = ? WHERE id = ?",
+            ("2026-02-10T00:00:00+00:00", s1),
+        )
+        conn.execute(
+            "UPDATE signals SET created_at = ? WHERE id = ?",
+            ("2026-02-10T01:00:00+00:00", s2),
+        )
+        conn.execute(
+            "UPDATE merge_operations SET created_at = ?, executed_at = ? WHERE id = ?",
+            ("2026-02-10T02:00:00+00:00", "2026-02-10T04:00:00+00:00", merge_id),
+        )
+        conn.commit()
+        conn.close()
+
+        rows = get_capital_turnover_inputs(db_path=db_path)
+        assert len(rows) == 1
+        row = rows[0]
+        assert row["bothside_group_id"] == bs_gid
+        assert row["first_entry_at"] == "2026-02-10T00:00:00+00:00"
+        assert row["released_at"] == "2026-02-10T04:00:00+00:00"
+        assert row["group_cost_usd"] == pytest.approx(45.0)
+        assert row["merge_amount"] == pytest.approx(50.0)
+        assert row["combined_vwap"] == pytest.approx(0.90)
+        assert row["gas_cost_usd"] == pytest.approx(0.2)
+        assert row["net_profit_usd"] == pytest.approx(4.8)
 
 
 class TestMergeEligibleGroups:
