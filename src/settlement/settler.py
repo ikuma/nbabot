@@ -319,14 +319,18 @@ def _resolve_winner(
     winner_short: str | None = None
     method: str = ""
 
+    # game_index は Final (status==3) のみ → 日付ガード不要
+    # 深夜 0-4 AM ET にスコアボードが前日分を返すケースを正しく処理
     game = game_index.get((home_full, away_full))
-    if game and slug_date == today_str:
+    if game:
         winner_full = _determine_winner(game)
         if winner_full:
             winner_short = get_team_short_name(winner_full)
             method = "nba_scores"
-    elif slug_date != today_str:
-        poly_result = _try_polymarket_fallback(signal, away_full, home_full, slug_date)
+    if not winner_short and slug_date != today_str:
+        poly_result = _try_polymarket_fallback(
+            signal, away_full, home_full, slug_date,
+        )
         if poly_result:
             winner_short, method = poly_result
 
