@@ -1,5 +1,14 @@
 # nbabot
 
+## AIドキュメント構成
+
+- `CLAUDE.md`: 憲法（最上位ポリシー + プロジェクト知識）
+- `docs/AI_POLICY.md`: 複数エージェント共通ルール
+- `AGENTS.md`: Codex 補足ルール
+- `docs/AI_RUNBOOK.md`: 実行コマンドと検証手順
+
+矛盾時の優先順位は `CLAUDE.md` を最優先とする。
+
 ## 言語設定
 
 - **応答は必ず日本語で行う**。コード内のコメント・docstring は英語 OK（コーディング規約に従う）。
