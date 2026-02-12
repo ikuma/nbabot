@@ -81,15 +81,15 @@ class TestNotifyTrade:
             expected_win_rate=0.904,
             dca_seq=1,
             dca_max=5,
+            signal_id=39,
         )
         assert result is True
         assert len(msgs) == 1
         text = msgs[0]
-        assert "Trade: BUY" in text
-        assert "New York Knicks" in text
-        assert "0.370" in text
-        assert "26.1%" in text
-        assert "SWEET" in text
+        assert "*BUY New York Knicks* #39" in text
+        assert "NYK @ BOS | 2026-02-11" in text
+        assert "Price: `0.370`" in text
+        assert "Edge: `26.1%`" in text
         assert "DCA 1/5" in text
         assert "LLM" not in text
         assert_telegram_markdown_safe(text)
@@ -114,9 +114,8 @@ class TestNotifyTrade:
         )
         text = msgs[0]
         assert "LLM: NYK" in text
-        assert "conf 0.72" in text
-        assert "sizing 1.2x" in text
-        assert "SWEET" not in text
+        assert "(0.72)" in text
+        assert "x1.20" in text
         assert_telegram_markdown_safe(text)
 
     def test_slug_underscores_escaped(self, monkeypatch):
@@ -168,14 +167,14 @@ class TestNotifyHedge:
             dca_seq=1,
             dca_max=5,
             edge_pct=4.0,
+            signal_id=41,
         )
         assert result is True
         text = msgs[0]
-        assert "Hedge: BUY" in text
-        assert "Boston Celtics" in text
+        assert "*HEDGE Boston Celtics* #41" in text
+        assert "NYK @ BOS | 2026-02-11" in text
         assert "Dir VWAP: 0.374" in text
-        assert "Combined: 0.954" in text
-        assert "Target: 0.970" in text
+        assert "Combined: `0.954`" in text
         assert_telegram_markdown_safe(text)
 
 
@@ -207,12 +206,14 @@ class TestNotifyDca:
             dca_seq=3,
             dca_max=5,
             trigger_reason="price_dip (-2.1%)",
+            signal_id=40,
         )
         assert result is True
         text = msgs[0]
-        assert "DCA 3/5" in text
-        assert "0.371" in text
-        assert "0.365" in text
+        assert "*DCA 3/5 New York Knicks* #40" in text
+        assert "NYK @ BOS | 2026-02-11" in text
+        assert "VWAP: 0.371" in text
+        assert "`0.365`" in text
         assert "price\\_dip" in text
         assert_telegram_markdown_safe(text)
 
@@ -247,10 +248,10 @@ class TestNotifyMerge:
         )
         assert result is True
         text = msgs[0]
-        assert "MERGE" in text
-        assert "150" in text
-        assert "0.9730" in text
-        assert "$4.05" in text
+        assert "*MERGE* NYK @ BOS | 2026-02-11" in text
+        assert "`150`" in text
+        assert "`0.9730`" in text
+        assert "+$4.05" in text
         assert "30 directional shares" in text
         assert_telegram_markdown_safe(text)
 
@@ -281,9 +282,16 @@ class TestNotifyTickHeader:
         result = notify_tick_header("2026-02-11", found=6, window=3, pending=2)
         assert "*Tick*" in result
         assert "2026-02-11" in result
-        assert "6 found" in result
-        assert "3 in window" in result
-        assert "2 pending" in result
+        assert "Games: 6" in result
+        assert "Window: 3" in result
+        assert "Pending: 2" in result
+        assert_telegram_markdown_safe(result)
+
+    def test_with_execution_mode(self):
+        result = notify_tick_header(
+            "2026-02-11", found=6, window=3, pending=2, execution_mode="live"
+        )
+        assert "| live" in result
         assert_telegram_markdown_safe(result)
 
 

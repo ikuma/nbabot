@@ -250,6 +250,7 @@ def main() -> None:
             expired,
             dca_results=dca_results,
             merge_results=merge_results,
+            execution_mode=execution_mode,
         )
         if summary_text:
             from src.notifications.telegram import send_message

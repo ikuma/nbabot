@@ -490,6 +490,7 @@ def process_single_job(
                 expected_win_rate=opp.expected_win_rate,
                 dca_seq=1,
                 dca_max=dca_max,
+                signal_id=signal_id,
                 llm_favored=llm_analysis.favored_team if llm_analysis else None,
                 llm_confidence=llm_analysis.confidence if llm_analysis else None,
                 llm_sizing=llm_analysis.sizing_modifier if llm_analysis else None,

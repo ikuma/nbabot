@@ -157,6 +157,24 @@ def escape_md(text: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Structured game info helper
+# ---------------------------------------------------------------------------
+
+
+def _format_game(event_slug: str) -> str:
+    """Convert 'nba-mil-okc-2026-02-12' → 'MIL @ OKC | 2026-02-12'."""
+    import re
+
+    m = re.match(r"^nba-([a-z]{3})-([a-z]{3})-(\d{4}-\d{2}-\d{2})$", event_slug)
+    if m:
+        return f"{m.group(1).upper()} @ {m.group(2).upper()} | {m.group(3)}"
+    return escape_md(event_slug)
+
+
+_SEP = "\u2500" * 13  # ─────────────
+
+
+# ---------------------------------------------------------------------------
 # Instant trade notifications (Phase N)
 # ---------------------------------------------------------------------------
 
@@ -174,23 +192,25 @@ def notify_trade(
     expected_win_rate: float,
     dca_seq: int,
     dca_max: int,
+    signal_id: int | None = None,
     llm_favored: str | None = None,
     llm_confidence: float | None = None,
     llm_sizing: float | None = None,
 ) -> bool:
     """Send instant notification for a directional trade."""
     try:
-        sweet = " \\[SWEET]" if in_sweet_spot else ""
+        sid = f" #{signal_id}" if signal_id else ""
         lines = [
-            f"*Trade: BUY {escape_md(outcome_name)}*",
-            escape_md(event_slug),
-            f"@ {order_price:.3f} (ask {best_ask:.3f}) | ${size_usd:.0f} | edge {edge_pct:.1f}%",
-            f"Band: {escape_md(price_band)}{sweet} | WR: {expected_win_rate:.1%}"
-            f" | DCA {dca_seq}/{dca_max}",
+            f"*BUY {escape_md(outcome_name)}*{sid}",
+            _format_game(event_slug),
+            _SEP,
+            f"Price: `{order_price:.3f}` (ask {best_ask:.3f})",
+            f"Size: `${size_usd:.0f}` | Edge: `{edge_pct:.1f}%`",
+            f"WR: {expected_win_rate:.0%} | DCA {dca_seq}/{dca_max}",
         ]
         if llm_favored:
-            conf = f" conf {llm_confidence:.2f}" if llm_confidence is not None else ""
-            sizing = f" sizing {llm_sizing:.1f}x" if llm_sizing is not None else ""
+            conf = f" ({llm_confidence:.2f})" if llm_confidence is not None else ""
+            sizing = f" x{llm_sizing:.2f}" if llm_sizing is not None else ""
             lines.append(f"LLM: {escape_md(llm_favored)}{conf}{sizing}")
         return send_message("\n".join(lines))
     except Exception:
@@ -211,16 +231,19 @@ def notify_hedge(
     dca_seq: int,
     dca_max: int,
     edge_pct: float,
+    signal_id: int | None = None,
 ) -> bool:
     """Send instant notification for a hedge trade."""
     try:
+        sid = f" #{signal_id}" if signal_id else ""
         lines = [
-            f"*Hedge: BUY {escape_md(outcome_name)}*",
-            escape_md(event_slug),
-            f"@ {order_price:.3f} (ask {best_ask:.3f}) | ${size_usd:.0f}",
-            f"Dir VWAP: {dir_vwap:.3f} | Combined: {combined_vwap:.3f}"
-            f" | Target: {target_combined:.3f}",
-            f"DCA {dca_seq}/{dca_max} | edge {edge_pct:.1f}%",
+            f"*HEDGE {escape_md(outcome_name)}*{sid}",
+            _format_game(event_slug),
+            _SEP,
+            f"Price: `{order_price:.3f}` (ask {best_ask:.3f})",
+            f"Size: `${size_usd:.0f}` | Edge: `{edge_pct:.1f}%`",
+            f"Dir VWAP: {dir_vwap:.3f} | Combined: `{combined_vwap:.3f}`",
+            f"DCA {dca_seq}/{dca_max}",
         ]
         return send_message("\n".join(lines))
     except Exception:
@@ -239,13 +262,17 @@ def notify_dca(
     dca_seq: int,
     dca_max: int,
     trigger_reason: str,
+    signal_id: int | None = None,
 ) -> bool:
     """Send instant notification for a DCA entry."""
     try:
+        sid = f" #{signal_id}" if signal_id else ""
         lines = [
-            f"*DCA {dca_seq}/{dca_max}: {escape_md(outcome_name)}*",
-            escape_md(event_slug),
-            f"@ {order_price:.3f} | ${size_usd:.0f} | VWAP {old_vwap:.3f} -> {new_vwap:.3f}",
+            f"*DCA {dca_seq}/{dca_max} {escape_md(outcome_name)}*{sid}",
+            _format_game(event_slug),
+            _SEP,
+            f"Price: `{order_price:.3f}` | Size: `${size_usd:.0f}`",
+            f"VWAP: {old_vwap:.3f} \u2192 `{new_vwap:.3f}`",
             f"Trigger: {escape_md(trigger_reason)}",
         ]
         return send_message("\n".join(lines))
@@ -268,9 +295,10 @@ def notify_merge(
     """Send instant notification for a MERGE result."""
     try:
         lines = [
-            f"*MERGE: {escape_md(event_slug)}*",
-            f"Shares: {merge_shares:.0f} | VWAP: {combined_vwap:.4f}",
-            f"Profit: ${net_profit:.2f} (gross ${gross_profit:.2f} - gas ${gas_cost:.2f})",
+            f"*MERGE* {_format_game(event_slug)}",
+            _SEP,
+            f"Shares: `{merge_shares:.0f}` | VWAP: `{combined_vwap:.4f}`",
+            f"Profit: `+${net_profit:.2f}` (gross ${gross_profit:.2f} \\- gas ${gas_cost:.2f})",
         ]
         if remainder_shares > 0 and remainder_side:
             lines.append(f"Remainder: {remainder_shares:.0f} {escape_md(remainder_side)} shares")
@@ -289,13 +317,15 @@ def notify_order_replaced(
     best_ask: float,
     replace_count: int,
     max_replaces: int,
+    signal_id: int | None = None,
 ) -> bool:
     """Send notification when an order is replaced at a new price."""
     try:
+        sid = f" #{signal_id}" if signal_id else ""
         lines = [
-            f"*Order Replaced ({replace_count}/{max_replaces})*",
-            f"BUY {escape_md(outcome_name)} | {escape_md(event_slug)}",
-            f"Old: {old_price:.3f} -> New: {new_price:.3f} (ask {best_ask:.3f})",
+            f"*REPLACE {replace_count}/{max_replaces}* {escape_md(outcome_name)}{sid}",
+            _format_game(event_slug),
+            f"{old_price:.3f} \u2192 `{new_price:.3f}` (ask {best_ask:.3f})",
         ]
         return send_message("\n".join(lines))
     except Exception:
@@ -309,13 +339,14 @@ def notify_order_filled_early(
     outcome_name: str,
     fill_price: float,
     signal_id: int,
+    size_usd: float | None = None,
 ) -> bool:
     """Send notification when order manager detects a fill."""
     try:
+        size_part = f" | `${size_usd:.0f}`" if size_usd else ""
         lines = [
-            f"*Order Filled*",
-            f"BUY {escape_md(outcome_name)} @ {fill_price:.3f}",
-            f"{escape_md(event_slug)} | signal #{signal_id}",
+            f"*FILLED* {escape_md(outcome_name)} @ `{fill_price:.3f}` #{signal_id}",
+            f"{_format_game(event_slug)}{size_part}",
         ]
         return send_message("\n".join(lines))
     except Exception:
@@ -328,6 +359,12 @@ def notify_tick_header(
     found: int,
     window: int,
     pending: int,
+    execution_mode: str = "",
 ) -> str:
     """Format tick summary header line. Returns formatted string (does not send)."""
-    return f"*Tick* ({game_date})\nGames: {found} found | {window} in window | {pending} pending"
+    mode_label = f" | {execution_mode}" if execution_mode else ""
+    return (
+        f"*Tick* {game_date}{mode_label}\n"
+        f"{_SEP}\n"
+        f"Games: {found} | Window: {window} | Pending: {pending}"
+    )

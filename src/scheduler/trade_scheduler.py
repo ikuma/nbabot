@@ -316,9 +316,10 @@ def format_tick_summary(
     db_path: str | None = None,
     games_found: int = 0,
     games_in_window: int = 0,
+    execution_mode: str = "",
 ) -> str | None:
     """Format a tick summary for Telegram. Returns None if nothing happened."""
-    from src.notifications.telegram import escape_md
+    from src.notifications.telegram import _SEP, escape_md
     from src.store.db import get_merge_operation, get_signal_by_id
 
     dca_results = dca_results or []
@@ -340,23 +341,18 @@ def format_tick_summary(
     merge_executed = grouped["merge_executed"]
     merge_failed = grouped["merge_failed"]
 
-    lines = [f"*Tick* ({game_date})"]
-    if games_found > 0:
-        lines.append(
-            f"Games: {games_found} | Window: {games_in_window}"
-            f" | Pending: {summary.pending}"
-        )
-    lines.append("")
+    mode_label = f" | {execution_mode}" if execution_mode else ""
+    lines = [f"*Tick* {game_date}{mode_label}", _SEP]
 
     if executed:
         lines.append(f"Executed: {len(executed)}")
         for r in executed:
             sig = get_signal_by_id(r.signal_id, db_path=path) if r.signal_id else None
             if sig:
-                sweet = " \\[SWEET]" if sig.in_sweet_spot else ""
                 lines.append(
-                    f"  #{r.signal_id} {escape_md(sig.team)} @ {sig.poly_price:.2f}"
-                    f" ${sig.kelly_size:.0f} edge={sig.calibration_edge_pct:.1f}%{sweet}"
+                    f"  #{r.signal_id} {escape_md(sig.team)}"
+                    f" @ {sig.poly_price:.2f} `${sig.kelly_size:.0f}`"
+                    f" edge={sig.calibration_edge_pct:.1f}%"
                 )
             else:
                 lines.append(f"  #{r.signal_id} {escape_md(r.event_slug)}")
@@ -367,7 +363,8 @@ def format_tick_summary(
             if sig:
                 lines.append(
                     f"  #{r.signal_id} {escape_md(sig.team)}"
-                    f" {sig.dca_sequence}/{sig.dca_sequence} @ {sig.poly_price:.2f}"
+                    f" {sig.dca_sequence}/{sig.dca_sequence}"
+                    f" @ {sig.poly_price:.2f} `${sig.kelly_size:.0f}`"
                 )
             else:
                 lines.append(f"  DCA #{r.signal_id} {escape_md(r.event_slug)}")
@@ -385,8 +382,9 @@ def format_tick_summary(
     if expired_count:
         lines.append(f"Expire: {expired_count}")
 
+    lines.append(_SEP)
     lines.append(
-        f"\nJobs: P={summary.pending} DCA={summary.dca_active} "
+        f"P={summary.pending} DCA={summary.dca_active} "
         f"OK={summary.executed} S={summary.skipped} "
         f"F={summary.failed} E={summary.expired}"
     )

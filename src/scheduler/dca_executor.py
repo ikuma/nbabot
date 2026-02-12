@@ -413,6 +413,7 @@ def process_dca_active_jobs(
                 dca_seq=decision.sequence,
                 dca_max=dca_config.max_entries,
                 trigger_reason=decision.reason,
+                signal_id=new_signal_id,
             )
         except Exception:
             logger.debug("DCA notification failed", exc_info=True)

@@ -471,6 +471,7 @@ def process_hedge_job(
                 dca_seq=1,
                 dca_max=dca_max,
                 edge_pct=edge_pct,
+                signal_id=signal_id,
             )
         except Exception:
             logger.debug("Hedge notification failed", exc_info=True)

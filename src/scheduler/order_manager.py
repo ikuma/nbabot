@@ -239,6 +239,7 @@ def check_single_order(
                 outcome_name=signal.team,
                 fill_price=fill_price,
                 signal_id=signal.id,
+                size_usd=signal.kelly_size,
             )
         except Exception:
             pass
@@ -363,6 +364,7 @@ def check_single_order(
                 best_ask=best_ask,
                 replace_count=replace_count + 1,
                 max_replaces=settings.order_max_replaces,
+                signal_id=signal.id,
             )
         except Exception:
             pass
