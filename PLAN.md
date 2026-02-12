@@ -409,6 +409,33 @@ LLM: NYK conf 0.72 sizing 1.2x
 
 ---
 
+## Phase P: Per-Signal P&L 修正 ✅ 完了
+
+### 背景
+settler.py で DCA グループ処理が bothside/MERGE 処理より先に走り、merge 回収分が反映されない重大バグを発見。
+IND@BKN (2/11) で実質 P&L -$26.42 が DB に -$77.11 と記録されていた ($50.69 の過少計上)。
+
+### 修正方針
+各シグナルが自分の P&L を自己完結で計算できるようにする。merge_executor が merge 時に per-signal の回収額を保存し、settler は単純な数式で P&L を算出。
+
+### 核心: `calc_signal_pnl()` 関数
+```python
+pnl = (remaining_shares × settlement_price) + merge_recovery_usd - cost
+```
+- merge なし (shares_merged=0) → 従来の `_calc_pnl` と同一
+- merge あり → remaining_shares × $1/$0 + 回収額 - コスト
+
+### 実装内容
+1. **Schema**: `signals` テーブルに `shares_merged`, `merge_recovery_usd` カラム追加 + backfill マイグレーション
+2. **Models**: `SignalRecord` に 2 フィールド追加
+3. **DB**: `update_signal_merge_data()` 関数追加
+4. **merge_executor**: merge 成功後に per-signal merge データを更新
+5. **pnl_calc**: `calc_signal_pnl()` 関数追加 (既存関数は温存)
+6. **settler**: `auto_settle()` を per-signal settlement に簡素化。グループ/MERGE 分岐を廃止し、全シグナルを均一に `calc_signal_pnl()` で処理
+7. **テスト**: `test_calc_signal_pnl.py` — 11 テスト (no-merge, partial merge, full merge, DCA+merge 統合)
+
+---
+
 ## ウォレットセキュリティ
 - **Cold Wallet (70%)**: ハードウェアウォレット、手動のみ
 - **Hot Wallet (30%)**: BOT用、取引上限付き

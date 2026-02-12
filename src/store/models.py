@@ -62,6 +62,8 @@ class SignalRecord:
     signal_role: str = "directional"
     # MERGE カラム
     condition_id: str | None = None
+    shares_merged: float = 0.0
+    merge_recovery_usd: float = 0.0
 
 
 @dataclass

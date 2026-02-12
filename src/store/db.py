@@ -866,6 +866,24 @@ def get_merge_eligible_groups(
         conn.close()
 
 
+def update_signal_merge_data(
+    signal_id: int,
+    shares_merged: float,
+    merge_recovery_usd: float,
+    db_path: Path | str = DEFAULT_DB_PATH,
+) -> None:
+    """Update per-signal merge data after MERGE execution."""
+    conn = _connect(db_path)
+    try:
+        conn.execute(
+            "UPDATE signals SET shares_merged = ?, merge_recovery_usd = ? WHERE id = ?",
+            (shares_merged, merge_recovery_usd, signal_id),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
 def update_merge_operation(
     merge_id: int,
     *,

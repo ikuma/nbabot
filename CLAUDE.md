@@ -44,6 +44,7 @@ Polymarket NBA キャリブレーション Bot。Polymarket の構造的ミス�
 | L2 | LLM-First Directional + Below-Market Limit | **完了** |
 | L-cache | LLM プロンプトキャッシング (共有ナレッジベース) | **完了** |
 | N | Telegram 通知強化 (即時通知 + enrichment) | **完了** |
+| P | Per-Signal P&L 修正 (merge 回収 per-signal 配分) | **完了** |
 | C | Total (O/U) マーケット校正 | 未着手 |
 | E | スケール + 本番運用 ($30-50K) | 未着手 |
 
@@ -402,3 +403,4 @@ Gamma Events API ──→ MoneylineMarket[] ──────────┤
 - hedge ジョブは常時作成 (bothside_opp の hedge=None でも)。実行時に注文板を取得し target-based pricing で発注可否を判定。
 - LLM プロンプトキャッシング (Phase L-cache): `SHARED_KNOWLEDGE_BASE` (~4K+ tokens) を `cache_control: {"type": "ephemeral"}` で 3 ペルソナ間共有。2 回目以降はキャッシュヒットで入力トークン ~60% 削減。ナレッジベースには NBA 統計予測因子・予測市場バイアス・確率推定ガイドラインを含むが、校正テーブル・Kelly 分数等の戦略パラメータは含めない。
 - Telegram 通知 (Phase N): 各 executor (job/hedge/dca/merge) が発注成功時に即座に `notify_*()` で Telegram 通知。全通知は try/except で wrap、失敗しても処理に影響なし。`escape_md()` で Markdown V1 特殊文字をエスケープ。tick summary は DB 参照 (`get_signal_by_id`) でチーム名・価格・エッジを enrichment。決済通知にはスコア・ROI を追記。`_preflight_check()` は `src/scheduler/preflight.py` に分離 (500 行対策)。
+- Per-Signal P&L (Phase P): `calc_signal_pnl()` で各シグナルが自己完結で P&L を算出。`shares_merged` + `merge_recovery_usd` を signals テーブルに保持。merge_executor が merge 成功時に per-signal 配分を書き込み、settler は全シグナルを均一に処理 (グループ/MERGE 分岐なし)。旧関数 (`_calc_pnl`, `_calc_dca_group_pnl`, `_calc_bothside_pnl`, `_calc_merge_pnl`) は後方互換のため温存。backfill マイグレーションで既存 merge データを signals に復元し、古い results を削除して再計算。

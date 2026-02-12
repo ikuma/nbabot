@@ -37,6 +37,7 @@ from src.settlement.pnl_calc import (  # noqa: E402, F401
     _calc_dca_group_pnl,
     _calc_merge_pnl,
     _calc_pnl,
+    calc_signal_pnl,
 )
 from src.settlement.settler import (  # noqa: E402, F401
     AutoSettleSummary,

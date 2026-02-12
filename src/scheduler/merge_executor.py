@@ -14,6 +14,33 @@ from src.store.db import DEFAULT_DB_PATH
 logger = logging.getLogger(__name__)
 
 
+def _update_per_signal_merge_data(
+    dir_signals,
+    hedge_signals,
+    dir_shares: float,
+    hedge_shares: float,
+    merge_amount: float,
+    combined_vwap: float,
+    db_path,
+    update_fn,
+) -> None:
+    """Write per-signal shares_merged and merge_recovery_usd after MERGE."""
+    for signals, total_shares in [
+        (dir_signals, dir_shares),
+        (hedge_signals, hedge_shares),
+    ]:
+        if total_shares <= 0:
+            continue
+        for sig in signals:
+            px = sig.fill_price if sig.fill_price is not None else sig.poly_price
+            if not px or px <= 0:
+                continue
+            sig_shares = sig.kelly_size / px
+            sig_merged = merge_amount * (sig_shares / total_shares)
+            sig_recovery = sig_merged * px / combined_vwap
+            update_fn(sig.id, sig_merged, sig_recovery, db_path=db_path)
+
+
 def process_merge_eligible(
     execution_mode: str = "paper",
     db_path: str | None = None,
@@ -31,6 +58,7 @@ def process_merge_eligible(
         log_merge_operation,
         update_job_merge_status,
         update_merge_operation,
+        update_signal_merge_data,
     )
     from src.strategy.merge_strategy import (
         calculate_combined_vwap,
@@ -153,6 +181,12 @@ def process_merge_eligible(
                         net_profit_usd=gross_profit - merge_result.gas_cost_usd,
                         db_path=path,
                     )
+                    # Per-signal merge データ更新
+                    _update_per_signal_merge_data(
+                        dir_signals, hedge_signals, dir_shares, hedge_shares,
+                        merge_amount, combined_vwap, path,
+                        update_signal_merge_data,
+                    )
                     update_job_merge_status(dir_job_id, "executed", merge_id, db_path=path)
                     update_job_merge_status(hedge_job_id, "executed", merge_id, db_path=path)
                     logger.info(
@@ -191,6 +225,12 @@ def process_merge_eligible(
                     gas_cost_usd=gas_cost_usd,
                     net_profit_usd=net_profit,
                     db_path=path,
+                )
+                # Per-signal merge データ更新
+                _update_per_signal_merge_data(
+                    dir_signals, hedge_signals, dir_shares, hedge_shares,
+                    merge_amount, combined_vwap, path,
+                    update_signal_merge_data,
                 )
                 update_job_merge_status(dir_job_id, "executed", merge_id, db_path=path)
                 update_job_merge_status(hedge_job_id, "executed", merge_id, db_path=path)

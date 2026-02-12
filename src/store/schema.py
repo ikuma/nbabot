@@ -249,6 +249,8 @@ def _ensure_bothside_columns(conn: sqlite3.Connection) -> None:
 # MERGE (Phase B2) 用カラム
 _MERGE_SIGNAL_COLUMNS = [
     ("condition_id", "TEXT"),
+    ("shares_merged", "REAL DEFAULT 0"),
+    ("merge_recovery_usd", "REAL DEFAULT 0"),
 ]
 
 _MERGE_JOB_COLUMNS = [
@@ -260,9 +262,12 @@ _MERGE_JOB_COLUMNS = [
 def _ensure_merge_columns(conn: sqlite3.Connection) -> None:
     """Add MERGE columns to signals and trade_jobs, and create merge_operations table."""
     sig_existing = {row[1] for row in conn.execute("PRAGMA table_info(signals)").fetchall()}
+    added_merge_signal_cols = False
     for col_name, col_def in _MERGE_SIGNAL_COLUMNS:
         if col_name not in sig_existing:
             conn.execute(f"ALTER TABLE signals ADD COLUMN {col_name} {col_def}")
+            if col_name in ("shares_merged", "merge_recovery_usd"):
+                added_merge_signal_cols = True
 
     job_existing = {row[1] for row in conn.execute("PRAGMA table_info(trade_jobs)").fetchall()}
     for col_name, col_def in _MERGE_JOB_COLUMNS:
@@ -270,6 +275,88 @@ def _ensure_merge_columns(conn: sqlite3.Connection) -> None:
             conn.execute(f"ALTER TABLE trade_jobs ADD COLUMN {col_name} {col_def}")
 
     conn.executescript(MERGE_OPERATIONS_SQL)
+    conn.commit()
+
+    # Backfill: 既存 merge_operations から per-signal merge データを復元
+    if added_merge_signal_cols:
+        _backfill_merge_signal_data(conn)
+
+
+def _backfill_merge_signal_data(conn: sqlite3.Connection) -> None:
+    """Backfill shares_merged + merge_recovery_usd from existing merge_operations.
+
+    Also deletes stale results for merge-affected signals so they get re-settled
+    with correct per-signal PnL.
+    """
+    merges = conn.execute(
+        "SELECT * FROM merge_operations WHERE status IN ('executed', 'simulated')"
+    ).fetchall()
+
+    if not merges:
+        return
+
+    for m in merges:
+        bs_gid = m["bothside_group_id"]
+        combined_vwap = m["combined_vwap"]
+        merge_amount = m["merge_amount"]
+
+        if combined_vwap <= 0:
+            continue
+
+        signals = conn.execute(
+            "SELECT * FROM signals WHERE bothside_group_id = ?", (bs_gid,)
+        ).fetchall()
+
+        dir_sigs = [s for s in signals if s["signal_role"] == "directional"]
+        hedge_sigs = [s for s in signals if s["signal_role"] == "hedge"]
+
+        # dir 側の合計シェア
+        dir_total_shares = 0.0
+        for s in dir_sigs:
+            px = s["fill_price"] if s["fill_price"] is not None else s["poly_price"]
+            if px and px > 0:
+                dir_total_shares += s["kelly_size"] / px
+
+        # hedge 側の合計シェア
+        hedge_total_shares = 0.0
+        for s in hedge_sigs:
+            px = s["fill_price"] if s["fill_price"] is not None else s["poly_price"]
+            if px and px > 0:
+                hedge_total_shares += s["kelly_size"] / px
+
+        # per-signal 配分
+        for s in dir_sigs:
+            px = s["fill_price"] if s["fill_price"] is not None else s["poly_price"]
+            if not px or px <= 0 or dir_total_shares <= 0:
+                continue
+            sig_shares = s["kelly_size"] / px
+            sig_merged = merge_amount * (sig_shares / dir_total_shares)
+            sig_recovery = sig_merged * px / combined_vwap
+            conn.execute(
+                "UPDATE signals SET shares_merged = ?, merge_recovery_usd = ? WHERE id = ?",
+                (sig_merged, sig_recovery, s["id"]),
+            )
+
+        for s in hedge_sigs:
+            px = s["fill_price"] if s["fill_price"] is not None else s["poly_price"]
+            if not px or px <= 0 or hedge_total_shares <= 0:
+                continue
+            sig_shares = s["kelly_size"] / px
+            sig_merged = merge_amount * (sig_shares / hedge_total_shares)
+            sig_recovery = sig_merged * px / combined_vwap
+            conn.execute(
+                "UPDATE signals SET shares_merged = ?, merge_recovery_usd = ? WHERE id = ?",
+                (sig_merged, sig_recovery, s["id"]),
+            )
+
+    # merge 対象シグナルの古い results を削除 (次回 auto_settle で再計算)
+    conn.execute("""
+        DELETE FROM results WHERE signal_id IN (
+            SELECT s.id FROM signals s
+            JOIN merge_operations mo ON s.bothside_group_id = mo.bothside_group_id
+            WHERE mo.status IN ('executed', 'simulated')
+        )
+    """)
     conn.commit()
 
 

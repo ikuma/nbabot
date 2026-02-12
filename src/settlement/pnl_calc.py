@@ -11,6 +11,27 @@ if TYPE_CHECKING:
     from src.store.db import MergeOperation, SignalRecord
 
 
+def calc_signal_pnl(
+    won: bool,
+    kelly_size: float,
+    poly_price: float,
+    fill_price: float | None = None,
+    shares_merged: float = 0.0,
+    merge_recovery_usd: float = 0.0,
+) -> float:
+    """Per-signal PnL (self-contained, no group dependency).
+
+    PnL = (remaining_shares × settlement_price) + merge_recovery_usd - cost
+    """
+    price = fill_price if fill_price is not None else poly_price
+    if price <= 0:
+        return -kelly_size
+    shares_bought = kelly_size / price
+    shares_remaining = shares_bought - shares_merged
+    settlement_value = shares_remaining * (1.0 if won else 0.0)
+    return settlement_value + merge_recovery_usd - kelly_size
+
+
 def _calc_pnl(
     won: bool,
     kelly_size: float,

@@ -11,11 +11,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from src.settlement.pnl_calc import (
+from src.settlement.pnl_calc import (  # noqa: F401
     _calc_bothside_pnl,
     _calc_dca_group_pnl,
     _calc_merge_pnl,
     _calc_pnl,
+    calc_signal_pnl,
 )
 
 if TYPE_CHECKING:
@@ -285,12 +286,67 @@ def _try_polymarket_fallback(
     return None
 
 
+def _resolve_winner(
+    signal: SignalRecord,
+    cache: dict[str, tuple[str, str] | None],
+    game_index: dict[tuple[str, str], NBAGame],
+    today_str: str,
+) -> tuple[str, str] | None:
+    """Determine winner for a signal's game (cached per event_slug).
+
+    Returns (winner_short, method) or None.
+    """
+    from src.connectors.team_mapping import full_name_from_abbr, get_team_short_name
+
+    slug = signal.event_slug
+    if slug in cache:
+        return cache[slug]
+
+    parsed = _parse_slug(slug)
+    if not parsed:
+        log.warning("Cannot parse slug '%s' for signal #%d", slug, signal.id)
+        cache[slug] = None
+        return None
+
+    away_abbr, home_abbr, slug_date = parsed
+    away_full = full_name_from_abbr(away_abbr)
+    home_full = full_name_from_abbr(home_abbr)
+    if not away_full or not home_full:
+        log.warning("Unknown team abbr in slug '%s' for signal #%d", slug, signal.id)
+        cache[slug] = None
+        return None
+
+    winner_short: str | None = None
+    method: str = ""
+
+    game = game_index.get((home_full, away_full))
+    if game and slug_date == today_str:
+        winner_full = _determine_winner(game)
+        if winner_full:
+            winner_short = get_team_short_name(winner_full)
+            method = "nba_scores"
+    elif slug_date != today_str:
+        poly_result = _try_polymarket_fallback(signal, away_full, home_full, slug_date)
+        if poly_result:
+            winner_short, method = poly_result
+
+    if not winner_short:
+        cache[slug] = None
+        return None
+
+    cache[slug] = (winner_short, method)
+    return (winner_short, method)
+
+
 def auto_settle(
     dry_run: bool = False,
     db_path: Path | str | None = None,
     today: str | None = None,
 ) -> AutoSettleSummary:
     """Auto-settle unsettled signals using NBA.com scores + Polymarket fallback.
+
+    Per-signal settlement: each signal calculates its own PnL using
+    calc_signal_pnl() which accounts for merge recovery.
 
     Args:
         today: Override today's date (YYYY-MM-DD) for testing. Defaults to today in ET.
@@ -300,7 +356,7 @@ def auto_settle(
     from zoneinfo import ZoneInfo
 
     from src.connectors.nba_schedule import fetch_todays_games
-    from src.connectors.team_mapping import full_name_from_abbr, get_team_short_name
+    from src.connectors.team_mapping import full_name_from_abbr
     from src.store.db import DEFAULT_DB_PATH, get_unsettled, log_result
 
     path = db_path or DEFAULT_DB_PATH
@@ -319,53 +375,7 @@ def auto_settle(
         log.info("No unsettled signals")
         return summary
 
-    # DCA グループをまとめる (同一 dca_group_id のシグナルは一括決済)
-    dca_groups: dict[str, list[SignalRecord]] = defaultdict(list)
-    standalone: list[SignalRecord] = []
-    for sig in unsettled:
-        gid = getattr(sig, "dca_group_id", None)
-        if gid:
-            dca_groups[gid].append(sig)
-        else:
-            standalone.append(sig)
-
-    # Bothside グループをまとめる (同一 bothside_group_id の DCA グループは一括決済)
-    bothside_groups: dict[str, dict[str, list[SignalRecord]]] = defaultdict(
-        lambda: defaultdict(list)
-    )
-    for sig in unsettled:
-        bs_gid = getattr(sig, "bothside_group_id", None)
-        role = getattr(sig, "signal_role", "directional")
-        if bs_gid:
-            bothside_groups[bs_gid][role].append(sig)
-
-    # DCA グループ代表 + スタンドアロンを統合してイテレーション
-    signals_to_process: list[tuple[SignalRecord, list[SignalRecord] | None]] = []
-    seen_groups: set[str] = set()
-    seen_bothside: set[str] = set()
-    for sig in unsettled:
-        bs_gid = getattr(sig, "bothside_group_id", None)
-        if bs_gid:
-            if bs_gid in seen_bothside:
-                continue
-            seen_bothside.add(bs_gid)
-            continue
-        gid = getattr(sig, "dca_group_id", None)
-        if gid:
-            if gid in seen_groups:
-                continue
-            seen_groups.add(gid)
-            signals_to_process.append((sig, dca_groups[gid]))
-        else:
-            signals_to_process.append((sig, None))
-
-    log.info(
-        "Found %d unsettled signal(s) (%d DCA groups, %d standalone, %d bothside groups)",
-        len(unsettled),
-        len(dca_groups),
-        len(standalone),
-        len(bothside_groups),
-    )
+    log.info("Found %d unsettled signal(s)", len(unsettled))
 
     # NBA.com スコアボードから final ゲームを取得
     all_games = fetch_todays_games()
@@ -377,287 +387,134 @@ def auto_settle(
     for g in final_games:
         game_index[(g.home_team, g.away_team)] = g
 
-    # NBA.com スコアボードは ET ベース — ローカル TZ ではなく ET の日付を使用
+    # NBA.com スコアボードは ET ベース
     today_str = today or datetime.now(timezone.utc).astimezone(
         ZoneInfo("America/New_York")
     ).strftime("%Y-%m-%d")
 
-    for signal, dca_group in signals_to_process:
-        parsed = _parse_slug(signal.event_slug)
-        if not parsed:
-            log.warning("Cannot parse slug '%s' for signal #%d", signal.event_slug, signal.id)
+    # winner キャッシュ (slug → result)
+    winner_cache: dict[str, tuple[str, str] | None] = {}
+
+    # 各シグナルを個別に settle
+    settled_signals: list[tuple[SignalRecord, float, bool, str]] = []
+
+    for signal in unsettled:
+        result = _resolve_winner(signal, winner_cache, game_index, today_str)
+        if result is None:
             summary.skipped += 1
             continue
 
-        away_abbr, home_abbr, slug_date = parsed
-        away_full = full_name_from_abbr(away_abbr)
-        home_full = full_name_from_abbr(home_abbr)
-        if not away_full or not home_full:
-            log.warning(
-                "Unknown team abbr in slug '%s' for signal #%d",
-                signal.event_slug,
-                signal.id,
-            )
-            summary.skipped += 1
-            continue
-
-        # 勝者判定 (NBA.com or Polymarket)
-        winner_short: str | None = None
-        method: str = ""
-
-        game = game_index.get((home_full, away_full))
-        if game and slug_date == today_str:
-            winner_full = _determine_winner(game)
-            if not winner_full:
-                log.warning("Tie or zero scores for signal #%d, skipping", signal.id)
-                summary.skipped += 1
-                continue
-            winner_short = get_team_short_name(winner_full)
-            method = "nba_scores"
-        elif slug_date != today_str:
-            poly_result = _try_polymarket_fallback(signal, away_full, home_full, slug_date)
-            if poly_result:
-                winner_short, method = poly_result
-
-        if not winner_short:
-            log.debug("Signal #%d: game not yet final or not found, skipping", signal.id)
-            summary.skipped += 1
-            continue
-
+        winner_short, method = result
         won = signal.team == winner_short
 
-        # PnL 計算: DCA グループ or 単一シグナル
-        if dca_group and len(dca_group) > 1:
-            group_pnl = _calc_dca_group_pnl(won, dca_group)
-            total_cost = sum(s.kelly_size for s in dca_group)
-            for sig in dca_group:
-                sig_pnl = group_pnl * (sig.kelly_size / total_cost) if total_cost > 0 else 0.0
-                if not dry_run:
-                    log_result(
-                        signal_id=sig.id,
-                        outcome=winner_short,
-                        won=won,
-                        pnl=sig_pnl,
-                        settlement_price=1.0 if won else 0.0,
-                        db_path=path,
-                    )
-            _game_ref = game_index.get((home_full, away_full))
-            result = SettleResult(
+        pnl = calc_signal_pnl(
+            won=won,
+            kelly_size=signal.kelly_size,
+            poly_price=signal.poly_price,
+            fill_price=signal.fill_price,
+            shares_merged=signal.shares_merged,
+            merge_recovery_usd=signal.merge_recovery_usd,
+        )
+
+        if not dry_run:
+            log_result(
                 signal_id=signal.id,
-                team=signal.team,
-                won=won,
-                pnl=group_pnl,
-                method=method,
-                total_cost=total_cost,
-                away_score=_game_ref.away_score if _game_ref else None,
-                home_score=_game_ref.home_score if _game_ref else None,
-            )
-            summary.settled.append(result)
-            status = "WIN" if won else "LOSS"
-            prefix = "[DRY-RUN] " if dry_run else ""
-            log.info(
-                "%sSettled DCA group (%d entries) #%d: %s -> %s (PnL: $%.2f) via %s",
-                prefix,
-                len(dca_group),
-                signal.id,
-                signal.team,
-                status,
-                group_pnl,
-                method,
-            )
-        else:
-            fill_px = getattr(signal, "fill_price", None)
-            pnl = _calc_pnl(won, signal.kelly_size, signal.poly_price, fill_px)
-            if not dry_run:
-                log_result(
-                    signal_id=signal.id,
-                    outcome=winner_short,
-                    won=won,
-                    pnl=pnl,
-                    settlement_price=1.0 if won else 0.0,
-                    db_path=path,
-                )
-            _game_ref = game_index.get((home_full, away_full))
-            result = SettleResult(
-                signal_id=signal.id,
-                team=signal.team,
+                outcome=winner_short,
                 won=won,
                 pnl=pnl,
+                settlement_price=1.0 if won else 0.0,
+                db_path=path,
+            )
+
+        settled_signals.append((signal, pnl, won, method))
+        prefix = "[DRY-RUN] " if dry_run else ""
+        status = "WIN" if won else "LOSS"
+        merge_tag = " [MERGE]" if signal.shares_merged > 0 else ""
+        log.info(
+            "%sSettled #%d: %s%s -> %s (PnL: $%.2f) via %s",
+            prefix, signal.id, signal.team, merge_tag, status, pnl, method,
+        )
+
+    # 通知用: event_slug 単位で集約して SettleResult を構築
+    game_settled: dict[str, list[tuple[SignalRecord, float, bool, str]]] = defaultdict(list)
+    for item in settled_signals:
+        game_settled[item[0].event_slug].append(item)
+
+    for slug, signals_data in game_settled.items():
+        total_pnl = sum(d[1] for d in signals_data)
+        total_cost = sum(d[0].kelly_size for d in signals_data)
+        has_merge = any(d[0].shares_merged > 0 for d in signals_data)
+
+        dir_pnl = sum(d[1] for d in signals_data if d[0].signal_role == "directional")
+        hedge_pnl = sum(d[1] for d in signals_data if d[0].signal_role == "hedge")
+
+        representative = signals_data[0][0]
+        method = signals_data[0][3]
+
+        # スコア取得
+        parsed = _parse_slug(slug)
+        away_score = None
+        home_score = None
+        if parsed:
+            away_full = full_name_from_abbr(parsed[0])
+            home_full = full_name_from_abbr(parsed[1])
+            if away_full and home_full:
+                _game_ref = game_index.get((home_full, away_full))
+                if _game_ref:
+                    away_score = _game_ref.away_score
+                    home_score = _game_ref.home_score
+
+        is_bothside = any(d[0].signal_role == "hedge" for d in signals_data)
+
+        if has_merge:
+            merge_recovery_total = sum(d[0].merge_recovery_usd for d in signals_data)
+            merge_cost_total = sum(
+                d[0].shares_merged * (d[0].fill_price or d[0].poly_price)
+                for d in signals_data
+                if (d[0].fill_price or d[0].poly_price) > 0
+            )
+            merge_pnl_val = merge_recovery_total - merge_cost_total
+            remainder_pnl = total_pnl - merge_pnl_val
+
+            settle_result = SettleResult(
+                signal_id=representative.id,
+                team=representative.team,
+                won=total_pnl > 0,
+                pnl=total_pnl,
                 method=method,
-                total_cost=signal.kelly_size,
-                away_score=_game_ref.away_score if _game_ref else None,
-                home_score=_game_ref.home_score if _game_ref else None,
+                is_bothside=is_bothside,
+                is_merged=True,
+                merge_pnl=merge_pnl_val,
+                remainder_pnl=remainder_pnl,
+                total_cost=total_cost,
+                away_score=away_score,
+                home_score=home_score,
             )
-            summary.settled.append(result)
-            status = "WIN" if won else "LOSS"
-            prefix = "[DRY-RUN] " if dry_run else ""
-            log.info(
-                "%sSettled #%d: %s -> %s (PnL: $%.2f) via %s",
-                prefix,
-                signal.id,
-                signal.team,
-                status,
-                pnl,
-                method,
-            )
-
-    # Bothside グループ決済
-    from src.store.db import get_merge_operation
-
-    for bs_gid, roles in bothside_groups.items():
-        dir_signals = roles.get("directional", [])
-        hedge_signals = roles.get("hedge", [])
-        all_bs_signals = dir_signals + hedge_signals
-        if not all_bs_signals:
-            continue
-
-        representative = dir_signals[0] if dir_signals else hedge_signals[0]
-        parsed = _parse_slug(representative.event_slug)
-        if not parsed:
-            summary.skipped += len(all_bs_signals)
-            continue
-
-        away_abbr, home_abbr, slug_date = parsed
-        away_full = full_name_from_abbr(away_abbr)
-        home_full = full_name_from_abbr(home_abbr)
-        if not away_full or not home_full:
-            summary.skipped += len(all_bs_signals)
-            continue
-
-        winner_short = None
-        method = ""
-        game = game_index.get((home_full, away_full))
-        if game and slug_date == today_str:
-            winner_full = _determine_winner(game)
-            if winner_full:
-                winner_short = get_team_short_name(winner_full)
-                method = "nba_scores"
-        elif slug_date != today_str:
-            poly_result = _try_polymarket_fallback(representative, away_full, home_full, slug_date)
-            if poly_result:
-                winner_short, method = poly_result
-
-        if not winner_short:
-            summary.skipped += len(all_bs_signals)
-            continue
-
-        # MERGE 済みかどうかで分岐
-        merge_op = get_merge_operation(bs_gid, db_path=path)
-        if merge_op and merge_op.status in ("executed", "simulated"):
-            merge_pnl_val, remainder_pnl, total_pnl = _calc_merge_pnl(
-                merge_op, winner_short, dir_signals, hedge_signals
-            )
-
-            if not dry_run:
-                total_cost = sum(s.kelly_size for s in all_bs_signals)
-                for sig in all_bs_signals:
-                    sig_pnl = total_pnl * (sig.kelly_size / total_cost) if total_cost > 0 else 0.0
-                    sig_won = total_pnl > 0
-                    log_result(
-                        signal_id=sig.id,
-                        outcome=winner_short,
-                        won=sig_won,
-                        pnl=sig_pnl,
-                        settlement_price=1.0 if sig_won else 0.0,
-                        db_path=path,
-                    )
-
-            _bs_cost = sum(s.kelly_size for s in all_bs_signals)
-            _game_ref = game_index.get((home_full, away_full))
-            result = SettleResult(
+        elif is_bothside:
+            settle_result = SettleResult(
                 signal_id=representative.id,
                 team=representative.team,
                 won=total_pnl > 0,
                 pnl=total_pnl,
                 method=method,
                 is_bothside=True,
-                is_merged=True,
-                merge_pnl=merge_pnl_val,
-                remainder_pnl=remainder_pnl,
-                total_cost=_bs_cost,
-                away_score=_game_ref.away_score if _game_ref else None,
-                home_score=_game_ref.home_score if _game_ref else None,
-            )
-            summary.settled.append(result)
-
-            prefix = "[DRY-RUN] " if dry_run else ""
-            log.info(
-                "%sSettled MERGE group %s: MERGE=$%.2f REM=$%.2f NET=$%.2f via %s",
-                prefix,
-                bs_gid[:8],
-                merge_pnl_val,
-                remainder_pnl,
-                total_pnl,
-                method,
-            )
-        else:
-            dir_pnl, hedge_pnl, combined_pnl = _calc_bothside_pnl(
-                winner_short, dir_signals, hedge_signals
-            )
-
-            if not dry_run:
-                if dir_signals:
-                    dir_won = dir_signals[0].team == winner_short
-                    total_dir_cost = sum(s.kelly_size for s in dir_signals)
-                    for sig in dir_signals:
-                        sig_pnl = (
-                            dir_pnl * (sig.kelly_size / total_dir_cost)
-                            if total_dir_cost > 0
-                            else 0.0
-                        )
-                        log_result(
-                            signal_id=sig.id,
-                            outcome=winner_short,
-                            won=dir_won,
-                            pnl=sig_pnl,
-                            settlement_price=1.0 if dir_won else 0.0,
-                            db_path=path,
-                        )
-                if hedge_signals:
-                    hedge_won = hedge_signals[0].team == winner_short
-                    total_hedge_cost = sum(s.kelly_size for s in hedge_signals)
-                    for sig in hedge_signals:
-                        sig_pnl = (
-                            hedge_pnl * (sig.kelly_size / total_hedge_cost)
-                            if total_hedge_cost > 0
-                            else 0.0
-                        )
-                        log_result(
-                            signal_id=sig.id,
-                            outcome=winner_short,
-                            won=hedge_won,
-                            pnl=sig_pnl,
-                            settlement_price=1.0 if hedge_won else 0.0,
-                            db_path=path,
-                        )
-
-            combined_won = combined_pnl > 0
-            _bs_cost2 = sum(s.kelly_size for s in all_bs_signals)
-            _game_ref = game_index.get((home_full, away_full))
-            result = SettleResult(
-                signal_id=representative.id,
-                team=representative.team,
-                won=combined_won,
-                pnl=combined_pnl,
-                method=method,
-                is_bothside=True,
                 dir_pnl=dir_pnl,
                 hedge_pnl=hedge_pnl,
-                total_cost=_bs_cost2,
-                away_score=_game_ref.away_score if _game_ref else None,
-                home_score=_game_ref.home_score if _game_ref else None,
+                total_cost=total_cost,
+                away_score=away_score,
+                home_score=home_score,
             )
-            summary.settled.append(result)
-
-            prefix = "[DRY-RUN] " if dry_run else ""
-            log.info(
-                "%sSettled BOTHSIDE group %s: DIR=$%.2f HEDGE=$%.2f NET=$%.2f via %s",
-                prefix,
-                bs_gid[:8],
-                dir_pnl,
-                hedge_pnl,
-                combined_pnl,
-                method,
+        else:
+            settle_result = SettleResult(
+                signal_id=representative.id,
+                team=representative.team,
+                won=total_pnl > 0,
+                pnl=total_pnl,
+                method=method,
+                total_cost=total_cost,
+                away_score=away_score,
+                home_score=home_score,
             )
+        summary.settled.append(settle_result)
 
     return summary
