@@ -44,6 +44,36 @@ def _get_directional_vwap(paired_job_id: int | None, db_path: str) -> float:
         return 0.0
 
 
+def _compute_live_dca_order_price(
+    job,
+    target_token_id: str,
+    current_price: float,
+    db_path: str,
+) -> float:
+    """Compute DCA live order price from order book and hedge constraints."""
+    dca_order_price = current_price  # fallback
+    try:
+        from src.connectors.polymarket import fetch_order_books_batch as _fetch_obs_dca
+        from src.sizing.liquidity import extract_liquidity as _extract_dca
+
+        obs = _fetch_obs_dca([target_token_id])
+        if obs and target_token_id in obs:
+            snap = _extract_dca(obs[target_token_id], target_token_id)
+            if snap and snap.best_ask > 0:
+                dca_order_price = below_market_price(snap.best_ask)
+    except Exception:
+        logger.warning("DCA order book fetch failed for job %d", job.id)
+
+    # hedge DCA: target combined で上限制限
+    if job.job_side == "hedge" and settings.bothside_enabled:
+        dir_vwap = _get_directional_vwap(job.paired_job_id, db_path)
+        if dir_vwap > 0:
+            max_hedge = settings.bothside_target_combined - dir_vwap
+            dca_order_price = apply_price_ceiling(dca_order_price, max_hedge)
+
+    return dca_order_price
+
+
 def process_dca_active_jobs(
     execution_mode: str = "paper",
     db_path: str | None = None,
@@ -262,27 +292,12 @@ def process_dca_active_jobs(
         # live モード: below-market 指値で発注
         if execution_mode == "live":
             try:
-                dca_order_price = current_price  # fallback
-                try:
-                    from src.connectors.polymarket import (
-                        fetch_order_books_batch as _fetch_obs_dca,
-                    )
-                    from src.sizing.liquidity import extract_liquidity as _extract_dca
-
-                    _obs = _fetch_obs_dca([target_token_id])
-                    if _obs and target_token_id in _obs:
-                        _snap = _extract_dca(_obs[target_token_id], target_token_id)
-                        if _snap and _snap.best_ask > 0:
-                            dca_order_price = below_market_price(_snap.best_ask)
-                except Exception:
-                    logger.warning("DCA order book fetch failed for job %d", job.id)
-
-                # hedge DCA: target combined で上限制限
-                if job.job_side == "hedge" and settings.bothside_enabled:
-                    _dir_vwap2 = _get_directional_vwap(job.paired_job_id, path)
-                    if _dir_vwap2 > 0:
-                        _max_h = settings.bothside_target_combined - _dir_vwap2
-                        dca_order_price = apply_price_ceiling(dca_order_price, _max_h)
+                dca_order_price = _compute_live_dca_order_price(
+                    job=job,
+                    target_token_id=target_token_id,
+                    current_price=current_price,
+                    db_path=path,
+                )
 
                 resp = place_limit_buy(target_token_id, dca_order_price, dca_size)
                 order_id = resp.get("orderID") or resp.get("id", "")
