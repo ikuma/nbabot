@@ -159,6 +159,10 @@ def process_hedge_job(
 ) -> JobResult:
     """Process a hedge job: re-check combined VWAP, then place order."""
     from src.sizing.position_sizer import calculate_dca_budget
+    from src.strategy.bothside_target import (
+        estimate_shares_from_pairs,
+        resolve_target_combined,
+    )
     from src.strategy.calibration_scanner import (
         _calibration_kelly,
         _ev_per_dollar,
@@ -196,22 +200,45 @@ def process_hedge_job(
 
         # Directional VWAP 算出
         dir_vwap = _compute_directional_vwap(dir_signals, dir_price)
+        dir_shares = estimate_shares_from_pairs(
+            [s.kelly_size for s in dir_signals],
+            [s.fill_price or s.poly_price for s in dir_signals],
+        )
+
+        max_target = min(
+            settings.bothside_target_combined_max,
+            settings.bothside_max_combined_vwap - 1e-6,
+        )
+        target_decision = resolve_target_combined(
+            static_target=settings.bothside_target_combined,
+            mode=settings.bothside_target_mode,
+            mergeable_shares_est=dir_shares,
+            estimated_fee_usd=settings.bothside_dynamic_estimated_fee_usd,
+            min_profit_usd=settings.merge_min_profit_usd,
+            min_target=settings.bothside_target_combined_min,
+            max_target=max_target,
+        )
+        target_combined = target_decision.target_combined
 
         # Target-based max hedge price (target_combined に一本化)
-        max_hedge_price = settings.bothside_target_combined - dir_vwap
+        max_hedge_price = target_combined - dir_vwap
         if max_hedge_price < 0.20:
             update_job_status(
                 job.id,
                 "skipped",
                 error_message=f"max_hedge_price {max_hedge_price:.3f} < 0.20 "
-                f"(dir_vwap={dir_vwap:.3f} target={settings.bothside_target_combined})",
+                f"(dir_vwap={dir_vwap:.3f} target={target_combined:.3f})",
                 db_path=db_path,
             )
             logger.info(
-                "Hedge job %d: max_hedge %.3f < 0.20 (dir_vwap=%.3f) → skipped",
+                "Hedge job %d: max_hedge %.3f < 0.20 "
+                "(dir_vwap=%.3f target=%.3f mode=%s shares=%.2f) → skipped",
                 job.id,
                 max_hedge_price,
                 dir_vwap,
+                target_combined,
+                target_decision.mode,
+                target_decision.mergeable_shares_est,
             )
             return JobResult(job.id, job.event_slug, "skipped")
 
@@ -429,7 +456,7 @@ def process_hedge_job(
                 size_usd=budget.slice_size_usd,
                 dir_vwap=dir_vwap,
                 combined_vwap=combined,
-                target_combined=settings.bothside_target_combined,
+                target_combined=target_combined,
                 dca_seq=1,
                 dca_max=dca_max,
                 edge_pct=edge_pct,

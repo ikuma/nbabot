@@ -21,27 +21,78 @@ from src.store.db import (
 logger = logging.getLogger(__name__)
 
 
-def _get_directional_vwap(paired_job_id: int | None, db_path: str) -> float:
-    """Get directional job's DCA group VWAP for hedge combined target."""
+def _get_directional_stats(paired_job_id: int | None, db_path: str) -> tuple[float, float]:
+    """Get directional DCA group stats: (vwap, shares)."""
     if not paired_job_id:
-        return 0.0
+        return 0.0, 0.0
     try:
         from src.scheduler.hedge_executor import _get_directional_dca_group
+        from src.strategy.bothside_target import estimate_shares_from_pairs
         from src.strategy.dca_strategy import calculate_vwap_from_pairs
 
         group_id = _get_directional_dca_group(paired_job_id, db_path)
         if not group_id:
-            return 0.0
+            return 0.0, 0.0
         signals = get_dca_group_signals(group_id, db_path=db_path)
         if not signals:
-            return 0.0
+            return 0.0, 0.0
+        prices = [s.fill_price or s.poly_price for s in signals]
+        costs = [s.kelly_size for s in signals]
         return calculate_vwap_from_pairs(
+            costs,
+            prices,
+        ), estimate_shares_from_pairs(
+            costs,
+            prices,
+        )
+    except Exception:
+        logger.warning("Failed to get directional stats for paired_job_id=%d", paired_job_id)
+        return 0.0, 0.0
+
+
+def _resolve_hedge_target_combined(dir_shares: float) -> float:
+    """Resolve hedge target_combined (static/dynamic)."""
+    from src.strategy.bothside_target import resolve_target_combined
+
+    max_target = min(
+        settings.bothside_target_combined_max,
+        settings.bothside_max_combined_vwap - 1e-6,
+    )
+    return resolve_target_combined(
+        static_target=settings.bothside_target_combined,
+        mode=settings.bothside_target_mode,
+        mergeable_shares_est=dir_shares,
+        estimated_fee_usd=settings.bothside_dynamic_estimated_fee_usd,
+        min_profit_usd=settings.merge_min_profit_usd,
+        min_target=settings.bothside_target_combined_min,
+        max_target=max_target,
+    ).target_combined
+
+
+def _get_directional_vwap(paired_job_id: int | None, db_path: str) -> float:
+    """Backward-compatible helper returning directional VWAP only."""
+    vwap, _ = _get_directional_stats(paired_job_id, db_path)
+    return vwap
+
+
+def _compute_directional_vwap_and_target(
+    paired_job_id: int | None,
+    db_path: str,
+) -> tuple[float, float]:
+    """Return (dir_vwap, target_combined) for hedge-side checks."""
+    dir_vwap, dir_shares = _get_directional_stats(paired_job_id, db_path)
+    target_combined = _resolve_hedge_target_combined(dir_shares)
+    return dir_vwap, target_combined
+
+
+def _legacy_vwap_for_log(signals):
+    """Deprecated helper kept to minimize diff size."""
+    from src.strategy.dca_strategy import calculate_vwap_from_pairs
+
+    return calculate_vwap_from_pairs(
             [s.kelly_size for s in signals],
             [s.fill_price or s.poly_price for s in signals],
         )
-    except Exception:
-        logger.warning("Failed to get directional VWAP for paired_job_id=%d", paired_job_id)
-        return 0.0
 
 
 def _compute_live_dca_order_price(
@@ -66,9 +117,11 @@ def _compute_live_dca_order_price(
 
     # hedge DCA: target combined で上限制限
     if job.job_side == "hedge" and settings.bothside_enabled:
-        dir_vwap = _get_directional_vwap(job.paired_job_id, db_path)
+        dir_vwap, target_combined = _compute_directional_vwap_and_target(
+            job.paired_job_id, db_path
+        )
         if dir_vwap > 0:
-            max_hedge = settings.bothside_target_combined - dir_vwap
+            max_hedge = target_combined - dir_vwap
             dca_order_price = apply_price_ceiling(dca_order_price, max_hedge)
 
     return dca_order_price
@@ -159,16 +212,18 @@ def process_dca_active_jobs(
 
         # Hedge DCA: combined target フィルター
         if job.job_side == "hedge" and settings.bothside_enabled:
-            _dir_vwap = _get_directional_vwap(job.paired_job_id, path)
+            _dir_vwap, _target_combined = _compute_directional_vwap_and_target(
+                job.paired_job_id, path
+            )
             if _dir_vwap > 0:
-                _max_hedge = settings.bothside_target_combined - _dir_vwap
+                _max_hedge = _target_combined - _dir_vwap
                 if current_price > _max_hedge:
                     logger.debug(
                         "Hedge DCA skip: price %.3f > max_hedge %.3f (dir_vwap=%.3f target=%.3f)",
                         current_price,
                         _max_hedge,
                         _dir_vwap,
-                        settings.bothside_target_combined,
+                        _target_combined,
                     )
                     continue
 

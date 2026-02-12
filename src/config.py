@@ -88,6 +88,10 @@ class Settings(BaseSettings):
     bothside_enabled: bool = True  # 両サイド購入はデフォルト有効 (利益の核心)
     bothside_max_combined_vwap: float = 0.995  # combined > threshold なら MERGE しない
     bothside_target_combined: float = 0.97  # hedge 指値算出基準 (MERGE 利鞘 3%/share)
+    bothside_target_mode: str = "static"  # "static" | "dynamic"
+    bothside_target_combined_min: float = 0.90  # dynamic target 下限
+    bothside_target_combined_max: float = 0.994  # dynamic target 上限
+    bothside_dynamic_estimated_fee_usd: float = 0.20  # dynamic target 用 fee 見積
     bothside_hedge_kelly_mult: float = 0.5  # hedge 側 Kelly 乗数 (directional の半分)
     bothside_hedge_ratio_mode: str = "static"  # "static" | "optimized"
     bothside_hedge_ratio_file: str = "data/optimized/hedge_ratio.json"
