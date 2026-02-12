@@ -125,6 +125,74 @@ def _check_hedge_target(signal: SignalRecord, new_price: float, db_path: str) ->
         return True  # fail-open: allow re-place
 
 
+def _expire_order(signal: SignalRecord, order_id: str, cancel_order, db_path: str) -> None:
+    """Cancel current order and mark as expired in DB/event log."""
+    if cancel_order(order_id):
+        update_order_status(signal.id, order_id, "cancelled", db_path=db_path)
+        log_order_event(
+            signal_id=signal.id,
+            event_type="expired",
+            order_id=order_id,
+            db_path=db_path,
+        )
+
+
+def _is_before_order_ttl(signal: SignalRecord, now: datetime) -> bool:
+    """Return True while order is still inside TTL keep window."""
+    if not signal.order_placed_at:
+        return False
+    try:
+        placed_at = datetime.fromisoformat(signal.order_placed_at.replace("Z", "+00:00"))
+        age_min = (now - placed_at).total_seconds() / 60
+        return age_min < settings.order_ttl_min
+    except (ValueError, AttributeError):
+        return False
+
+
+def _is_past_tipoff(signal: SignalRecord, now: datetime, db_path: str) -> bool:
+    """Check whether the corresponding game tipoff has passed."""
+    try:
+        from src.store.db import _connect
+
+        conn = _connect(db_path)
+        try:
+            row = conn.execute(
+                """SELECT game_time_utc FROM trade_jobs
+                   WHERE event_slug = ? AND job_side = ?
+                   LIMIT 1""",
+                (signal.event_slug, signal.signal_role),
+            ).fetchone()
+        finally:
+            conn.close()
+
+        if row and row[0]:
+            tipoff = datetime.fromisoformat(row[0].replace("Z", "+00:00"))
+            return now >= tipoff
+    except Exception:
+        logger.debug("Tipoff check failed for signal #%d", signal.id, exc_info=True)
+    return False
+
+
+def _estimate_current_order_price(signal: SignalRecord, replace_count: int, db_path: str) -> float:
+    """Estimate current live order price from original price and placed history."""
+    current_order_price = signal.order_original_price or signal.poly_price
+    if replace_count <= 0 or not signal.order_placed_at:
+        return current_order_price
+
+    try:
+        from src.store.db import get_order_events
+
+        events = get_order_events(signal.id, db_path=db_path)
+        placed_events = [e for e in events if e.event_type == "placed"]
+        if placed_events:
+            last_placed = placed_events[-1]
+            if last_placed.price and last_placed.price > 0:
+                return last_placed.price
+    except Exception:
+        return current_order_price
+    return current_order_price
+
+
 def check_single_order(
     signal: SignalRecord,
     db_path: str,
@@ -191,19 +259,8 @@ def check_single_order(
         return OrderCheckResult(signal.id, "cancelled", old_order_id=order_id)
 
     # b. TTL チェック
-    order_age_ok = True
-    if signal.order_placed_at:
-        try:
-            placed_at = datetime.fromisoformat(signal.order_placed_at.replace("Z", "+00:00"))
-            age_min = (now - placed_at).total_seconds() / 60
-            if age_min < settings.order_ttl_min:
-                order_age_ok = False
-        except (ValueError, AttributeError):
-            pass
-
     update_order_lifecycle(signal.id, order_last_checked_at=now_iso, db_path=db_path)
-
-    if not order_age_ok:
+    if _is_before_order_ttl(signal, now):
         return OrderCheckResult(signal.id, "kept", old_order_id=order_id)
 
     # c. 再発注判定
@@ -211,51 +268,19 @@ def check_single_order(
 
     # 最大再発注回数超過 → cancel + expired
     if replace_count >= settings.order_max_replaces:
-        if cancel_order(order_id):
-            update_order_status(signal.id, order_id, "cancelled", db_path=db_path)
-            log_order_event(
-                signal_id=signal.id,
-                event_type="expired",
-                order_id=order_id,
-                db_path=db_path,
-            )
+        _expire_order(signal, order_id, cancel_order, db_path)
         logger.info(
             "Order %s expired: max replaces %d (signal #%d)", order_id, replace_count, signal.id,
         )
         return OrderCheckResult(signal.id, "expired", old_order_id=order_id)
 
     # ティップオフ過ぎ → cancel + expired
-    try:
-        from src.store.db import _connect
-
-        conn = _connect(db_path)
-        try:
-            row = conn.execute(
-                """SELECT game_time_utc FROM trade_jobs
-                   WHERE event_slug = ? AND job_side = ?
-                   LIMIT 1""",
-                (signal.event_slug, signal.signal_role),
-            ).fetchone()
-        finally:
-            conn.close()
-
-        if row and row[0]:
-            tipoff = datetime.fromisoformat(row[0].replace("Z", "+00:00"))
-            if now >= tipoff:
-                if cancel_order(order_id):
-                    update_order_status(signal.id, order_id, "cancelled", db_path=db_path)
-                    log_order_event(
-                        signal_id=signal.id,
-                        event_type="expired",
-                        order_id=order_id,
-                        db_path=db_path,
-                    )
-                logger.info(
-                    "Order %s expired: past tipoff (signal #%d)", order_id, signal.id,
-                )
-                return OrderCheckResult(signal.id, "expired", old_order_id=order_id)
-    except Exception:
-        logger.debug("Tipoff check failed for signal #%d", signal.id, exc_info=True)
+    if _is_past_tipoff(signal, now, db_path):
+        _expire_order(signal, order_id, cancel_order, db_path)
+        logger.info(
+            "Order %s expired: past tipoff (signal #%d)", order_id, signal.id,
+        )
+        return OrderCheckResult(signal.id, "expired", old_order_id=order_id)
 
     # best_ask 取得 → re-place 判定
     best_ask = _get_best_ask(signal.token_id)
@@ -265,21 +290,7 @@ def check_single_order(
     # 現在の注文価格を推定 (order_original_price は初回価格、実際の注文価格は再発注後は変わる)
     # order_placed_at が更新されるたびに poly_price は変わらないが、
     # 注文価格は best_ask - 0.01 で再計算される
-    current_order_price = signal.order_original_price or signal.poly_price
-    if replace_count > 0 and signal.order_placed_at:
-        # 再発注済みの場合、前回の best_ask - 0.01 だが正確には追跡できない
-        # order_events から最後の placed イベントの price を取得
-        try:
-            from src.store.db import get_order_events
-
-            events = get_order_events(signal.id, db_path=db_path)
-            placed_events = [e for e in events if e.event_type == "placed"]
-            if placed_events:
-                last_placed = placed_events[-1]
-                if last_placed.price and last_placed.price > 0:
-                    current_order_price = last_placed.price
-        except Exception:
-            pass
+    current_order_price = _estimate_current_order_price(signal, replace_count, db_path)
 
     new_price = below_market_price(best_ask)
 
@@ -289,14 +300,7 @@ def check_single_order(
 
     # Hedge の場合: target_combined 再チェック
     if _is_hedge_signal(signal) and not _check_hedge_target(signal, new_price, db_path):
-        if cancel_order(order_id):
-            update_order_status(signal.id, order_id, "cancelled", db_path=db_path)
-            log_order_event(
-                signal_id=signal.id,
-                event_type="expired",
-                order_id=order_id,
-                db_path=db_path,
-            )
+        _expire_order(signal, order_id, cancel_order, db_path)
         return OrderCheckResult(signal.id, "expired", old_order_id=order_id)
 
     # Cancel + Re-place
