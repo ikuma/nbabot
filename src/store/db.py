@@ -152,6 +152,21 @@ def get_unsettled(db_path: Path | str = DEFAULT_DB_PATH) -> list[SignalRecord]:
         conn.close()
 
 
+def get_signal_by_id(
+    signal_id: int,
+    db_path: Path | str = DEFAULT_DB_PATH,
+) -> SignalRecord | None:
+    """Return a single signal by ID, or None if not found."""
+    conn = _connect(db_path)
+    try:
+        row = conn.execute("SELECT * FROM signals WHERE id = ?", (signal_id,)).fetchone()
+        if row:
+            return SignalRecord(**dict(row))
+        return None
+    finally:
+        conn.close()
+
+
 def get_all_signals(db_path: Path | str = DEFAULT_DB_PATH) -> list[SignalRecord]:
     """Return all signals ordered by creation time (newest first)."""
     conn = _connect(db_path)

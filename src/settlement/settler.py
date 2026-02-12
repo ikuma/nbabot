@@ -50,6 +50,10 @@ class SettleResult:
     is_merged: bool = False
     merge_pnl: float = 0.0
     remainder_pnl: float = 0.0
+    # Enrichment fields (Phase N)
+    total_cost: float = 0.0
+    away_score: int | None = None
+    home_score: int | None = None
 
 
 @dataclass
@@ -85,20 +89,30 @@ class AutoSettleSummary:
             status = "WIN" if r.won else "LOSS"
             # Telegram Markdown V1: _ をエスケープ (italic 誤解釈防止)
             method = r.method.replace("_", "\\_")
+            roi_str = ""
+            if r.total_cost > 0:
+                roi_pct = (r.pnl / r.total_cost) * 100
+                roi_str = f" (ROI {roi_pct:+.1f}%)"
             if r.is_merged:
                 lines.append(
                     f"  #{r.signal_id} \\[MERGE] {r.team}: "
                     f"MERGE=${r.merge_pnl:+.2f} REM=${r.remainder_pnl:+.2f} "
-                    f"NET=${r.pnl:+.2f} ({method})"
+                    f"NET=${r.pnl:+.2f}{roi_str} ({method})"
                 )
             elif r.is_bothside:
                 lines.append(
                     f"  #{r.signal_id} \\[BOTHSIDE] {r.team}: "
                     f"DIR=${r.dir_pnl:+.2f} HEDGE=${r.hedge_pnl:+.2f} "
-                    f"NET=${r.pnl:+.2f} ({method})"
+                    f"NET=${r.pnl:+.2f}{roi_str} ({method})"
                 )
             else:
-                lines.append(f"  #{r.signal_id} {r.team}: {status} ${r.pnl:+.2f} ({method})")
+                lines.append(
+                    f"  #{r.signal_id} {r.team}: {status}"
+                    f" ${r.pnl:+.2f}{roi_str} ({method})"
+                )
+            # スコア追記
+            if r.away_score is not None and r.home_score is not None:
+                lines.append(f"    Score: {r.away_score}-{r.home_score}")
         return "\n".join(lines)
 
 
@@ -427,12 +441,16 @@ def auto_settle(
                         settlement_price=1.0 if won else 0.0,
                         db_path=path,
                     )
+            _game_ref = game_index.get((home_full, away_full))
             result = SettleResult(
                 signal_id=signal.id,
                 team=signal.team,
                 won=won,
                 pnl=group_pnl,
                 method=method,
+                total_cost=total_cost,
+                away_score=_game_ref.away_score if _game_ref else None,
+                home_score=_game_ref.home_score if _game_ref else None,
             )
             summary.settled.append(result)
             status = "WIN" if won else "LOSS"
@@ -459,12 +477,16 @@ def auto_settle(
                     settlement_price=1.0 if won else 0.0,
                     db_path=path,
                 )
+            _game_ref = game_index.get((home_full, away_full))
             result = SettleResult(
                 signal_id=signal.id,
                 team=signal.team,
                 won=won,
                 pnl=pnl,
                 method=method,
+                total_cost=signal.kelly_size,
+                away_score=_game_ref.away_score if _game_ref else None,
+                home_score=_game_ref.home_score if _game_ref else None,
             )
             summary.settled.append(result)
             status = "WIN" if won else "LOSS"
@@ -540,6 +562,8 @@ def auto_settle(
                         db_path=path,
                     )
 
+            _bs_cost = sum(s.kelly_size for s in all_bs_signals)
+            _game_ref = game_index.get((home_full, away_full))
             result = SettleResult(
                 signal_id=representative.id,
                 team=representative.team,
@@ -550,6 +574,9 @@ def auto_settle(
                 is_merged=True,
                 merge_pnl=merge_pnl_val,
                 remainder_pnl=remainder_pnl,
+                total_cost=_bs_cost,
+                away_score=_game_ref.away_score if _game_ref else None,
+                home_score=_game_ref.home_score if _game_ref else None,
             )
             summary.settled.append(result)
 
@@ -605,6 +632,8 @@ def auto_settle(
                         )
 
             combined_won = combined_pnl > 0
+            _bs_cost2 = sum(s.kelly_size for s in all_bs_signals)
+            _game_ref = game_index.get((home_full, away_full))
             result = SettleResult(
                 signal_id=representative.id,
                 team=representative.team,
@@ -614,6 +643,9 @@ def auto_settle(
                 is_bothside=True,
                 dir_pnl=dir_pnl,
                 hedge_pnl=hedge_pnl,
+                total_cost=_bs_cost2,
+                away_score=_game_ref.away_score if _game_ref else None,
+                home_score=_game_ref.home_score if _game_ref else None,
             )
             summary.settled.append(result)
 

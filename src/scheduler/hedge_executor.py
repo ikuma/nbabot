@@ -11,7 +11,8 @@ import uuid
 from datetime import datetime, timedelta, timezone
 
 from src.config import settings
-from src.scheduler.job_executor import JobResult, _preflight_check
+from src.scheduler.job_executor import JobResult
+from src.scheduler.preflight import preflight_check as _preflight_check
 from src.store.db import (
     TradeJob,
     get_dca_group_signals,
@@ -350,6 +351,26 @@ def process_hedge_job(
             )
         else:
             update_job_status(job.id, "executed", signal_id=signal_id, db_path=db_path)
+
+        # 即時通知 (Phase N)
+        try:
+            from src.notifications.telegram import notify_hedge
+
+            notify_hedge(
+                outcome_name=hedge_outcome,
+                event_slug=job.event_slug,
+                order_price=order_price,
+                best_ask=best_ask,
+                size_usd=budget.slice_size_usd,
+                dir_vwap=dir_vwap,
+                combined_vwap=combined,
+                target_combined=settings.bothside_target_combined,
+                dca_seq=1,
+                dca_max=dca_max,
+                edge_pct=edge_pct,
+            )
+        except Exception:
+            logger.debug("Hedge notification failed", exc_info=True)
 
         logger.info(
             "Hedge job %d (%s): BUY %s @ %.3f (best_ask=%.3f) $%.0f combined=%.4f signal #%d [%s]",

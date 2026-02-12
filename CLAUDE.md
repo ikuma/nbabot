@@ -43,6 +43,7 @@ Polymarket NBA キャリブレーション Bot。Polymarket の構造的ミス�
 | W | launchd 移行 + 死活監視 (watchdog) | **完了** |
 | L2 | LLM-First Directional + Below-Market Limit | **完了** |
 | L-cache | LLM プロンプトキャッシング (共有ナレッジベース) | **完了** |
+| N | Telegram 通知強化 (即時通知 + enrichment) | **完了** |
 | C | Total (O/U) マーケット校正 | 未着手 |
 | E | スケール + 本番運用 ($30-50K) | 未着手 |
 
@@ -77,7 +78,8 @@ nbabot/
 │   │   ├── job_executor.py           # 初回発注処理 (directional)
 │   │   ├── hedge_executor.py         # Hedge ジョブ処理 (bothside)
 │   │   ├── dca_executor.py           # DCA 追加購入処理
-│   │   └── merge_executor.py         # MERGE 処理 (CTF mergePositions)
+│   │   ├── merge_executor.py         # MERGE 処理 (CTF mergePositions)
+│   │   └── preflight.py             # 発注前チェック (残高, 日次上限)
 │   ├── settlement/
 │   │   ├── pnl_calc.py              # 決済 P&L 計算 (DCA, bothside, merge)
 │   │   └── settler.py               # 決済コアロジック (auto_settle, settle_signal)
@@ -399,3 +401,4 @@ Gamma Events API ──→ MoneylineMarket[] ──────────┤
 - Hedge Target Pricing (Phase L2): `max_hedge = target_combined - dir_vwap` で上限を算出。`BOTHSIDE_TARGET_COMBINED` (default 0.97) で MERGE 利鞘 3%/share を確保。`hedge_max_price` は旧 at-market 発注の名残で、below-market limit では `target_combined` に一本化。hedge は「フリーオプション」: fill しなくても directional だけで +EV。
 - hedge ジョブは常時作成 (bothside_opp の hedge=None でも)。実行時に注文板を取得し target-based pricing で発注可否を判定。
 - LLM プロンプトキャッシング (Phase L-cache): `SHARED_KNOWLEDGE_BASE` (~4K+ tokens) を `cache_control: {"type": "ephemeral"}` で 3 ペルソナ間共有。2 回目以降はキャッシュヒットで入力トークン ~60% 削減。ナレッジベースには NBA 統計予測因子・予測市場バイアス・確率推定ガイドラインを含むが、校正テーブル・Kelly 分数等の戦略パラメータは含めない。
+- Telegram 通知 (Phase N): 各 executor (job/hedge/dca/merge) が発注成功時に即座に `notify_*()` で Telegram 通知。全通知は try/except で wrap、失敗しても処理に影響なし。`escape_md()` で Markdown V1 特殊文字をエスケープ。tick summary は DB 参照 (`get_signal_by_id`) でチーム名・価格・エッジを enrichment。決済通知にはスコア・ROI を追記。`_preflight_check()` は `src/scheduler/preflight.py` に分離 (500 行対策)。

@@ -273,8 +273,13 @@ def format_tick_summary(
     dca_results: list[JobResult] | None = None,
     merge_results: list[JobResult] | None = None,
     db_path: str | None = None,
+    games_found: int = 0,
+    games_in_window: int = 0,
 ) -> str | None:
     """Format a tick summary for Telegram. Returns None if nothing happened."""
+    from src.notifications.telegram import escape_md
+    from src.store.db import get_merge_operation, get_signal_by_id
+
     dca_results = dca_results or []
     merge_results = merge_results or []
     all_results = results + dca_results + merge_results
@@ -293,35 +298,69 @@ def format_tick_summary(
     merge_executed = [r for r in merge_results if r.status == "executed"]
     merge_failed = [r for r in merge_results if r.status == "failed"]
 
-    lines = [f"*Scheduler Tick* ({game_date})"]
+    lines = [f"*Tick* ({game_date})"]
+    if games_found > 0:
+        lines.append(
+            f"Games: {games_found} | Window: {games_in_window}"
+            f" | Pending: {summary.pending}"
+        )
+    lines.append("")
 
     if executed:
         lines.append(f"Executed: {len(executed)}")
         for r in executed:
-            lines.append(f"  #{r.signal_id} {r.event_slug}")
+            sig = get_signal_by_id(r.signal_id, db_path=path) if r.signal_id else None
+            if sig:
+                sweet = " \\[SWEET]" if sig.in_sweet_spot else ""
+                lines.append(
+                    f"  #{r.signal_id} {escape_md(sig.team)} @ {sig.poly_price:.2f}"
+                    f" ${sig.kelly_size:.0f} edge={sig.calibration_edge_pct:.1f}%{sweet}"
+                )
+            else:
+                lines.append(f"  #{r.signal_id} {escape_md(r.event_slug)}")
     if dca_executed:
-        lines.append(f"DCA entries: {len(dca_executed)}")
+        lines.append(f"DCA: {len(dca_executed)}")
         for r in dca_executed:
-            lines.append(f"  DCA #{r.signal_id} {r.event_slug}")
+            sig = get_signal_by_id(r.signal_id, db_path=path) if r.signal_id else None
+            if sig:
+                lines.append(
+                    f"  #{r.signal_id} {escape_md(sig.team)}"
+                    f" {sig.dca_sequence}/{sig.dca_sequence} @ {sig.poly_price:.2f}"
+                )
+            else:
+                lines.append(f"  DCA #{r.signal_id} {escape_md(r.event_slug)}")
     if merge_executed:
         lines.append(f"MERGE: {len(merge_executed)}")
         for r in merge_executed:
-            lines.append(f"  MERGE {r.event_slug}")
+            # merge 結果の取得を試みる
+            _slug = escape_md(r.event_slug)
+            try:
+                from src.store.db import get_bothside_signals
+
+                # merge_operations からイベントの利益を取得
+                _bs_sigs = get_bothside_signals(r.event_slug, db_path=path)
+                if _bs_sigs and _bs_sigs[0].bothside_group_id:
+                    _mop = get_merge_operation(_bs_sigs[0].bothside_group_id, db_path=path)
+                    if _mop and _mop.net_profit_usd is not None:
+                        lines.append(f"  {_slug} +${_mop.net_profit_usd:.2f}")
+                        continue
+            except Exception:
+                pass
+            lines.append(f"  MERGE {_slug}")
     if skipped:
-        lines.append(f"Skipped: {len(skipped)}")
+        lines.append(f"Skip: {len(skipped)}")
     if failed or dca_failed or merge_failed:
         total_failed = failed + dca_failed + merge_failed
-        lines.append(f"Failed: {len(total_failed)}")
+        lines.append(f"Fail: {len(total_failed)}")
         for r in total_failed:
-            lines.append(f"  {r.event_slug}: {r.error}")
+            lines.append(f"  {escape_md(r.event_slug)}: {escape_md(r.error or 'unknown')}")
     if expired_count:
-        lines.append(f"Expired: {expired_count}")
+        lines.append(f"Expire: {expired_count}")
 
     lines.append(
-        f"\nJobs: P={summary.pending} X={summary.executing} "
+        f"\nJobs: P={summary.pending} DCA={summary.dca_active} "
         f"OK={summary.executed} S={summary.skipped} "
-        f"F={summary.failed} E={summary.expired} "
-        f"DCA={summary.dca_active}"
+        f"F={summary.failed} E={summary.expired}"
     )
 
     # 何も発注していなければ通知しない (ノイズ削減)

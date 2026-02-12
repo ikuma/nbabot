@@ -380,6 +380,35 @@ Phase L の LLM 分析を実戦投入可能な発注戦略に統合。3 つの�
 
 ---
 
+## Phase N: Telegram 通知強化
+
+### 概要
+Telegram 通知を「いつ・何を・いくらで・なぜ」がリアルタイムにわかるレベルに強化。
+
+### 実装内容
+1. **即時通知**: 各 executor (job/hedge/dca/merge) が発注成功時に即座に Telegram 通知
+2. **通知関数**: `notify_trade()`, `notify_hedge()`, `notify_dca()`, `notify_merge()` + `escape_md()`
+3. **Tick summary enrichment**: `format_tick_summary()` が DB 参照でチーム名・価格・エッジ・DCA 進捗を表示
+4. **決済通知拡充**: `SettleResult` にスコア・ROI を追加、`format_summary()` で表示
+5. **Preflight 分離**: `_preflight_check()` を `src/scheduler/preflight.py` に分離 (500行対策)
+6. **DB ヘルパー**: `get_signal_by_id()` 追加
+
+### 通知フォーマット例
+```
+*Trade: BUY New York Knicks*
+nba-nyk-bos-2026-02-11
+@ 0.370 (ask 0.380) | $42 | edge 26.1%
+Band: 0.35-0.40 [SWEET] | WR: 90.4% | DCA 1/5
+LLM: NYK conf 0.72 sizing 1.2x
+```
+
+### 設計方針
+- JobResult は不変、executor 層で即時通知
+- 全通知は try/except で wrap、失敗しても処理に影響なし
+- Markdown V1 エスケープ (`escape_md()`) で Telegram パースエラー防止
+
+---
+
 ## ウォレットセキュリティ
 - **Cold Wallet (70%)**: ハードウェアウォレット、手動のみ
 - **Hot Wallet (30%)**: BOT用、取引上限付き

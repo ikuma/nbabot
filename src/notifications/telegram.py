@@ -139,3 +139,152 @@ def format_opportunities(opportunities: list) -> str:
                 f"   Books: {opp.bookmakers_count}"
             )
     return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# Markdown V1 escape helper
+# ---------------------------------------------------------------------------
+
+# Telegram Markdown V1 special characters that can cause parse errors
+_MD_V1_SPECIAL = str.maketrans(
+    {"_": "\\_", "[": "\\[", "]": "\\]", "(": "\\(", ")": "\\)"}
+)
+
+
+def escape_md(text: str) -> str:
+    """Escape Telegram Markdown V1 special characters in data strings."""
+    return str(text).translate(_MD_V1_SPECIAL)
+
+
+# ---------------------------------------------------------------------------
+# Instant trade notifications (Phase N)
+# ---------------------------------------------------------------------------
+
+
+def notify_trade(
+    *,
+    outcome_name: str,
+    event_slug: str,
+    order_price: float,
+    best_ask: float,
+    size_usd: float,
+    edge_pct: float,
+    price_band: str,
+    in_sweet_spot: bool,
+    expected_win_rate: float,
+    dca_seq: int,
+    dca_max: int,
+    llm_favored: str | None = None,
+    llm_confidence: float | None = None,
+    llm_sizing: float | None = None,
+) -> bool:
+    """Send instant notification for a directional trade."""
+    try:
+        sweet = " \\[SWEET]" if in_sweet_spot else ""
+        lines = [
+            f"*Trade: BUY {escape_md(outcome_name)}*",
+            escape_md(event_slug),
+            f"@ {order_price:.3f} (ask {best_ask:.3f}) | ${size_usd:.0f} | edge {edge_pct:.1f}%",
+            f"Band: {escape_md(price_band)}{sweet} | WR: {expected_win_rate:.1%}"
+            f" | DCA {dca_seq}/{dca_max}",
+        ]
+        if llm_favored:
+            conf = f" conf {llm_confidence:.2f}" if llm_confidence is not None else ""
+            sizing = f" sizing {llm_sizing:.1f}x" if llm_sizing is not None else ""
+            lines.append(f"LLM: {escape_md(llm_favored)}{conf}{sizing}")
+        return send_message("\n".join(lines))
+    except Exception:
+        logger.debug("notify_trade failed", exc_info=True)
+        return False
+
+
+def notify_hedge(
+    *,
+    outcome_name: str,
+    event_slug: str,
+    order_price: float,
+    best_ask: float,
+    size_usd: float,
+    dir_vwap: float,
+    combined_vwap: float,
+    target_combined: float,
+    dca_seq: int,
+    dca_max: int,
+    edge_pct: float,
+) -> bool:
+    """Send instant notification for a hedge trade."""
+    try:
+        lines = [
+            f"*Hedge: BUY {escape_md(outcome_name)}*",
+            escape_md(event_slug),
+            f"@ {order_price:.3f} (ask {best_ask:.3f}) | ${size_usd:.0f}",
+            f"Dir VWAP: {dir_vwap:.3f} | Combined: {combined_vwap:.3f}"
+            f" | Target: {target_combined:.3f}",
+            f"DCA {dca_seq}/{dca_max} | edge {edge_pct:.1f}%",
+        ]
+        return send_message("\n".join(lines))
+    except Exception:
+        logger.debug("notify_hedge failed", exc_info=True)
+        return False
+
+
+def notify_dca(
+    *,
+    outcome_name: str,
+    event_slug: str,
+    order_price: float,
+    size_usd: float,
+    old_vwap: float,
+    new_vwap: float,
+    dca_seq: int,
+    dca_max: int,
+    trigger_reason: str,
+) -> bool:
+    """Send instant notification for a DCA entry."""
+    try:
+        lines = [
+            f"*DCA {dca_seq}/{dca_max}: {escape_md(outcome_name)}*",
+            escape_md(event_slug),
+            f"@ {order_price:.3f} | ${size_usd:.0f} | VWAP {old_vwap:.3f} -> {new_vwap:.3f}",
+            f"Trigger: {escape_md(trigger_reason)}",
+        ]
+        return send_message("\n".join(lines))
+    except Exception:
+        logger.debug("notify_dca failed", exc_info=True)
+        return False
+
+
+def notify_merge(
+    *,
+    event_slug: str,
+    merge_shares: float,
+    combined_vwap: float,
+    gross_profit: float,
+    gas_cost: float,
+    net_profit: float,
+    remainder_shares: float,
+    remainder_side: str | None,
+) -> bool:
+    """Send instant notification for a MERGE result."""
+    try:
+        lines = [
+            f"*MERGE: {escape_md(event_slug)}*",
+            f"Shares: {merge_shares:.0f} | VWAP: {combined_vwap:.4f}",
+            f"Profit: ${net_profit:.2f} (gross ${gross_profit:.2f} - gas ${gas_cost:.2f})",
+        ]
+        if remainder_shares > 0 and remainder_side:
+            lines.append(f"Remainder: {remainder_shares:.0f} {escape_md(remainder_side)} shares")
+        return send_message("\n".join(lines))
+    except Exception:
+        logger.debug("notify_merge failed", exc_info=True)
+        return False
+
+
+def notify_tick_header(
+    game_date: str,
+    found: int,
+    window: int,
+    pending: int,
+) -> str:
+    """Format tick summary header line. Returns formatted string (does not send)."""
+    return f"*Tick* ({game_date})\nGames: {found} found | {window} in window | {pending} pending"

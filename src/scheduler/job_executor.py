@@ -10,6 +10,7 @@ import uuid
 from dataclasses import dataclass
 
 from src.config import settings
+from src.scheduler.preflight import preflight_check as _preflight_check  # noqa: F401
 from src.store.db import (
     TradeJob,
     update_dca_job,
@@ -28,52 +29,6 @@ class JobResult:
     status: str  # executed, skipped, failed
     signal_id: int | None = None
     error: str | None = None
-
-
-def _preflight_check() -> bool:
-    """Run pre-trade checks for live execution."""
-    from datetime import date
-
-    from src.connectors.polymarket import get_usdc_balance
-    from src.store.db import get_todays_exposure, get_todays_live_orders
-
-    try:
-        if not settings.polymarket_private_key:
-            logger.error("[preflight] POLYMARKET_PRIVATE_KEY not set")
-            return False
-
-        balance = get_usdc_balance()
-        if balance < settings.min_balance_usd:
-            logger.error(
-                "[preflight] Balance $%.2f < minimum $%.2f",
-                balance,
-                settings.min_balance_usd,
-            )
-            return False
-
-        today_str = date.today().strftime("%Y-%m-%d")
-        order_count = get_todays_live_orders(today_str)
-        if order_count >= settings.max_daily_positions:
-            logger.error(
-                "[preflight] Daily order limit reached: %d/%d",
-                order_count,
-                settings.max_daily_positions,
-            )
-            return False
-
-        exposure = get_todays_exposure(today_str)
-        if exposure >= settings.max_daily_exposure_usd:
-            logger.error(
-                "[preflight] Daily exposure limit: $%.0f/$%.0f",
-                exposure,
-                settings.max_daily_exposure_usd,
-            )
-            return False
-
-        return True
-    except Exception:
-        logger.exception("[preflight] Check failed")
-        return False
 
 
 def process_single_job(
@@ -447,6 +402,34 @@ def process_single_job(
                 )
                 logger.exception("Job %d: order failed", job.id)
                 return JobResult(job.id, job.event_slug, "failed", signal_id, str(e)), None
+
+        # 即時通知 (Phase N)
+        try:
+            from src.notifications.telegram import notify_trade
+
+            _has_ask = _liq_snap and _liq_snap.best_ask > 0
+            _notif_ask = _liq_snap.best_ask if _has_ask else opp.poly_price
+            _notif_price = opp.poly_price  # paper mode default
+            if execution_mode == "live":
+                _notif_price = order_price  # set in live block above
+            notify_trade(
+                outcome_name=opp.outcome_name,
+                event_slug=opp.event_slug,
+                order_price=_notif_price,
+                best_ask=_notif_ask,
+                size_usd=budget.slice_size_usd,
+                edge_pct=opp.calibration_edge_pct,
+                price_band=opp.price_band,
+                in_sweet_spot=opp.in_sweet_spot,
+                expected_win_rate=opp.expected_win_rate,
+                dca_seq=1,
+                dca_max=dca_max,
+                llm_favored=llm_analysis.favored_team if llm_analysis else None,
+                llm_confidence=llm_analysis.confidence if llm_analysis else None,
+                llm_sizing=llm_analysis.sizing_modifier if llm_analysis else None,
+            )
+        except Exception:
+            logger.debug("Trade notification failed", exc_info=True)
 
         # DCA 有効なら dca_active に遷移
         if dca_max > 1:

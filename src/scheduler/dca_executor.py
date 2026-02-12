@@ -268,6 +268,32 @@ def process_dca_active_jobs(
                 results.append(JobResult(job.id, job.event_slug, "failed", new_signal_id, str(e)))
                 continue
 
+        # 即時通知 (Phase N)
+        try:
+            from src.notifications.telegram import notify_dca
+            from src.strategy.dca_strategy import calculate_vwap_from_pairs
+
+            _old_vwap = decision.vwap
+            _stub = type("_S", (), {"kelly_size": dca_size, "poly_price": current_price})
+            _new_signals = signals + [_stub]
+            _new_vwap = calculate_vwap_from_pairs(
+                [s.kelly_size for s in _new_signals],
+                [getattr(s, "fill_price", None) or s.poly_price for s in _new_signals],
+            )
+            notify_dca(
+                outcome_name=target_team,
+                event_slug=job.event_slug,
+                order_price=current_price,
+                size_usd=dca_size,
+                old_vwap=_old_vwap,
+                new_vwap=_new_vwap,
+                dca_seq=decision.sequence,
+                dca_max=dca_config.max_entries,
+                trigger_reason=decision.reason,
+            )
+        except Exception:
+            logger.debug("DCA notification failed", exc_info=True)
+
         # DCA カウント更新
         new_count = job.dca_entries_count + 1
         new_status = "dca_active" if new_count < job.dca_max_entries else "executed"

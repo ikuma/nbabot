@@ -203,6 +203,28 @@ def process_merge_eligible(
                     net_profit,
                 )
 
+            # 即時通知 (Phase N)
+            try:
+                from src.notifications.telegram import notify_merge
+
+                _gas = gas_cost_usd
+                _net = net_profit
+                if execution_mode == "live":
+                    _gas = merge_result.gas_cost_usd  # type: ignore[possibly-undefined]
+                    _net = gross_profit - _gas
+                notify_merge(
+                    event_slug=event_slug,
+                    merge_shares=merge_amount,
+                    combined_vwap=combined_vwap,
+                    gross_profit=gross_profit,
+                    gas_cost=_gas,
+                    net_profit=_net,
+                    remainder_shares=remainder,
+                    remainder_side=remainder_side,
+                )
+            except Exception:
+                logger.debug("MERGE notification failed", exc_info=True)
+
             results.append(JobResult(dir_job_id, event_slug, "executed"))
 
         except Exception as e:
