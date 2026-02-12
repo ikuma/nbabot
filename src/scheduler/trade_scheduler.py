@@ -280,6 +280,27 @@ def _partition_tick_results(
     }
 
 
+def _format_merge_result_line(
+    result: JobResult,
+    db_path: str,
+    escape_md,
+    get_merge_operation,
+) -> str:
+    """Format one MERGE summary line with optional net profit lookup."""
+    from src.store.db import get_bothside_signals
+
+    slug = escape_md(result.event_slug)
+    try:
+        bs_signals = get_bothside_signals(result.event_slug, db_path=db_path)
+        if bs_signals and bs_signals[0].bothside_group_id:
+            merge_op = get_merge_operation(bs_signals[0].bothside_group_id, db_path=db_path)
+            if merge_op and merge_op.net_profit_usd is not None:
+                return f"  {slug} +${merge_op.net_profit_usd:.2f}"
+    except Exception:
+        pass
+    return f"  MERGE {slug}"
+
+
 # ---------------------------------------------------------------------------
 # 4. format_tick_summary — Telegram 通知用
 # ---------------------------------------------------------------------------
@@ -353,21 +374,7 @@ def format_tick_summary(
     if merge_executed:
         lines.append(f"MERGE: {len(merge_executed)}")
         for r in merge_executed:
-            # merge 結果の取得を試みる
-            _slug = escape_md(r.event_slug)
-            try:
-                from src.store.db import get_bothside_signals
-
-                # merge_operations からイベントの利益を取得
-                _bs_sigs = get_bothside_signals(r.event_slug, db_path=path)
-                if _bs_sigs and _bs_sigs[0].bothside_group_id:
-                    _mop = get_merge_operation(_bs_sigs[0].bothside_group_id, db_path=path)
-                    if _mop and _mop.net_profit_usd is not None:
-                        lines.append(f"  {_slug} +${_mop.net_profit_usd:.2f}")
-                        continue
-            except Exception:
-                pass
-            lines.append(f"  MERGE {_slug}")
+            lines.append(_format_merge_result_line(r, path, escape_md, get_merge_operation))
     if skipped:
         lines.append(f"Skip: {len(skipped)}")
     if failed or dca_failed or merge_failed:
