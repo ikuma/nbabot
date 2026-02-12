@@ -600,6 +600,34 @@ order_size     = min(raw_gap, remaining_budget, per_entry_cap)
 
 ---
 
+## Phase H: MERGE-First Hedge 改革 ✅
+
+**目的**: MERGE を主戦略に昇格。hedge は「条件が合えば追加するオプション」ではなく「常に試みる。問題は指値の価格だけ」に。
+
+**背景**: sovereign2013 の利益の 46.5% が MERGE。にもかかわらず旧設計ではスキャナーの静的ガード (`ev > 0`, `price <= 0.55`, `combined < 0.995`) が多くの MERGE 機会を潰していた。`BOTHSIDE_TARGET_COMBINED = 0.97` が固定で MERGE 利鞘 3% を要求 → 実際の gas+手数料はほぼゼロなのに保守的すぎた。
+
+**設計原則**:
+1. **常に hedge を試みる** — scanner は combined < max_combined_vwap の安全弁のみ
+2. **MERGE 経済性から限界価格を導出** — `max_hedge = 1.0 - dir_vwap - min_margin`
+3. **指値は注文板ベースで動的** — `best_ask - 0.01` を上限に収める
+4. **fill しなくても OK** — directional 単体で +EV、hedge は「フリーオプション」
+
+**変更一覧**:
+- `calibration_scanner.py`: `_hedge_margin_multiplier()` 追加、hedge ガード簡素化 (EV/price ガード削除、動的乗数)
+- `hedge_executor.py`: MERGE 経済性ベースの動的限界価格、EV チェック緩和 (MERGE-only パス)、コストベースサイジング
+- `dca_executor.py`: 同じ動的限界価格適用
+- `job_executor.py`: `hedge_max_price` 引数削除
+- `config.py`: `merge_est_gas_usd`, `merge_min_shares_floor` 追加。`bothside_target_combined`, `bothside_hedge_max_price` を DEPRECATED
+- テスト: 11 テスト (既存更新 + 新規 4 件)
+
+**設定**:
+- `MERGE_EST_GAS_USD=0.05` — MERGE gas 見積もり (Polygon, 保守的)
+- `MERGE_MIN_SHARES_FLOOR=20.0` — 最小想定 shares (安全弁)
+- `BOTHSIDE_TARGET_COMBINED` — DEPRECATED (executor が動的算出)
+- `BOTHSIDE_HEDGE_MAX_PRICE` — DEPRECATED (scanner が常に hedge を返す)
+
+---
+
 ## ウォレットセキュリティ
 - **Cold Wallet (70%)**: ハードウェアウォレット、手動のみ
 - **Hot Wallet (30%)**: BOT用、取引上限付き

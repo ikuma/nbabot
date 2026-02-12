@@ -272,7 +272,6 @@ def process_single_job(
                 liquidity_map=liquidity_map,
                 max_combined_vwap=settings.bothside_max_combined_vwap,
                 hedge_kelly_mult=effective_hedge_mult,
-                hedge_max_price=settings.bothside_hedge_max_price,
             )
             if bothside_results:
                 bothside_opp = bothside_results[0]

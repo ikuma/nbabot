@@ -87,16 +87,16 @@ class Settings(BaseSettings):
     # === Both-Side Betting (Phase B) ===
     bothside_enabled: bool = True  # 両サイド購入はデフォルト有効 (利益の核心)
     bothside_max_combined_vwap: float = 0.995  # combined > threshold なら MERGE しない
-    bothside_target_combined: float = 0.97  # hedge 指値算出基準 (MERGE 利鞘 3%/share)
-    bothside_target_mode: str = "static"  # "static" | "dynamic"
-    bothside_target_combined_min: float = 0.90  # dynamic target 下限
-    bothside_target_combined_max: float = 0.994  # dynamic target 上限
-    bothside_dynamic_estimated_fee_usd: float = 0.20  # dynamic target 用 fee 見積
-    bothside_hedge_kelly_mult: float = 0.5  # hedge 側 Kelly 乗数 (directional の半分)
+    bothside_target_combined: float = 0.97  # DEPRECATED: executor uses dynamic MERGE-based pricing
+    bothside_target_mode: str = "static"  # DEPRECATED: kept for backward compat
+    bothside_target_combined_min: float = 0.90  # DEPRECATED: kept for backward compat
+    bothside_target_combined_max: float = 0.994  # DEPRECATED: kept for backward compat
+    bothside_dynamic_estimated_fee_usd: float = 0.20  # DEPRECATED: kept for backward compat
+    bothside_hedge_kelly_mult: float = 0.5  # hedge 側 Kelly 乗数 (MERGE-only パスのフォールバック)
     bothside_hedge_ratio_mode: str = "static"  # "static" | "optimized"
     bothside_hedge_ratio_file: str = "data/optimized/hedge_ratio.json"
     bothside_hedge_delay_min: int = 30  # directional 発注→ hedge 最小遅延 (分)
-    bothside_hedge_max_price: float = 0.55  # hedge 価格上限 (sweet spot 上限と同値)
+    bothside_hedge_max_price: float = 0.55  # DEPRECATED: scanner always returns hedge
 
     # === LLM Game Analysis (Phase L) ===
     llm_analysis_enabled: bool = False  # フィーチャーフラグ (デフォルト OFF)
@@ -117,10 +117,12 @@ class Settings(BaseSettings):
     order_check_batch_size: int = 10  # 1 tick あたり最大チェック数
     order_rate_limit_sleep: float = 0.5  # API 呼び出し間の sleep 秒
 
-    # === MERGE (Phase B2) ===
+    # === MERGE (Phase B2/H) ===
     merge_enabled: bool = True  # MERGE はデフォルト有効 (BOTHSIDE とは独立)
     merge_max_combined_vwap: float = 0.998  # これ以上なら MERGE しない
     merge_min_profit_usd: float = 0.10  # MERGE 利益最低額 (gas 負け防止)
+    merge_est_gas_usd: float = 0.05  # MERGE gas 見積もり USD (Polygon, 保守的)
+    merge_min_shares_floor: float = 20.0  # MERGE 最小想定 shares (動的 margin 算出の安全弁)
     merge_gas_buffer_gwei: int = 50  # gas price 上限
     merge_max_retries: int = 3  # MERGE 失敗リトライ上限
     merge_early_partial_enabled: bool = False  # DCA 完了前の条件付き部分 MERGE

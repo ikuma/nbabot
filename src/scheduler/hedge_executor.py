@@ -220,25 +220,24 @@ def process_hedge_job(
         )
         target_combined = target_decision.target_combined
 
-        # Target-based max hedge price (target_combined に一本化)
-        max_hedge_price = target_combined - dir_vwap
-        if max_hedge_price < 0.20:
+        # MERGE 経済性から動的に限界価格を算出 (Phase H)
+        _gas_plus_profit = settings.merge_est_gas_usd + settings.merge_min_profit_usd
+        _min_margin = _gas_plus_profit / settings.merge_min_shares_floor
+        max_hedge_price = 1.0 - dir_vwap - _min_margin
+        max_hedge_price = min(max_hedge_price, settings.bothside_max_combined_vwap - dir_vwap)
+
+        if max_hedge_price < 0.01:
             update_job_status(
                 job.id,
                 "skipped",
-                error_message=f"max_hedge_price {max_hedge_price:.3f} < 0.20 "
-                f"(dir_vwap={dir_vwap:.3f} target={target_combined:.3f})",
+                error_message=f"max_hedge {max_hedge_price:.3f} < 0.01 (dir_vwap={dir_vwap:.3f})",
                 db_path=db_path,
             )
             logger.info(
-                "Hedge job %d: max_hedge %.3f < 0.20 "
-                "(dir_vwap=%.3f target=%.3f mode=%s shares=%.2f) → skipped",
+                "Hedge job %d: max_hedge %.3f < 0.01 (dir_vwap=%.3f) → skipped",
                 job.id,
                 max_hedge_price,
                 dir_vwap,
-                target_combined,
-                target_decision.mode,
-                target_decision.mergeable_shares_est,
             )
             return JobResult(job.id, job.event_slug, "skipped")
 
@@ -284,30 +283,42 @@ def process_hedge_job(
 
         ev = _ev_per_dollar(est.lower_bound, order_price)
         if ev <= 0:
-            update_job_status(
-                job.id, "skipped", error_message="Hedge EV non-positive", db_path=db_path
+            logger.info(
+                "Hedge job %d: EV non-positive (%.3f) — proceeding for MERGE (combined=%.4f)",
+                job.id,
+                ev,
+                combined,
             )
-            return JobResult(job.id, job.event_slug, "skipped")
 
-        # サイジング (LLM hedge_ratio 適用: Phase L)
+        # サイジング: 正 EV → Kelly ベース、非正 EV → MERGE-only (cost-based)
         kelly = _calibration_kelly(est.lower_bound, order_price)
-        from src.strategy.hedge_ratio_runtime import resolve_hedge_kelly_mult
+        if kelly > 0:
+            # 正 EV パス: Kelly ベース (既存)
+            from src.strategy.hedge_ratio_runtime import resolve_hedge_kelly_mult
 
-        hedge_mult = resolve_hedge_kelly_mult(settings.bothside_hedge_kelly_mult)
-        if settings.llm_analysis_enabled:
-            from src.strategy.llm_cache import get_cached_analysis
+            hedge_mult = resolve_hedge_kelly_mult(settings.bothside_hedge_kelly_mult)
+            if settings.llm_analysis_enabled:
+                from src.strategy.llm_cache import get_cached_analysis
 
-            _llm = get_cached_analysis(job.event_slug, db_path=db_path)
-            if _llm:
-                hedge_mult = max(0.3, min(0.8, _llm.hedge_ratio))
-                logger.info(
-                    "Hedge job %d: LLM hedge_ratio=%.2f (was %.2f)",
-                    job.id,
-                    hedge_mult,
-                    settings.bothside_hedge_kelly_mult,
-                )
-        kelly *= hedge_mult
-        kelly_usd = min(kelly * settings.max_position_usd * 10, settings.max_position_usd)
+                _llm = get_cached_analysis(job.event_slug, db_path=db_path)
+                if _llm:
+                    hedge_mult = max(0.3, min(0.8, _llm.hedge_ratio))
+                    logger.info(
+                        "Hedge job %d: LLM hedge_ratio=%.2f (was %.2f)",
+                        job.id,
+                        hedge_mult,
+                        settings.bothside_hedge_kelly_mult,
+                    )
+            kelly *= hedge_mult
+            kelly_usd = min(kelly * settings.max_position_usd * 10, settings.max_position_usd)
+        else:
+            # MERGE-only パス: directional コストベースのサイジング
+            from src.strategy.calibration_scanner import _hedge_margin_multiplier
+
+            dir_total_cost = sum(s.kelly_size for s in dir_signals) if dir_signals else 0
+            merge_margin = 1.0 - combined
+            effective_mult = _hedge_margin_multiplier(merge_margin)
+            kelly_usd = min(dir_total_cost * effective_mult, settings.max_position_usd)
 
         dca_max = settings.dca_max_entries
         budget = calculate_dca_budget(

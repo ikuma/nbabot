@@ -90,6 +90,16 @@ def _confidence_multiplier(est: WinRateEstimate) -> float:
     return max(0.5, min(1.0, ratio))
 
 
+def _hedge_margin_multiplier(merge_margin: float) -> float:
+    """Scale hedge multiplier based on MERGE margin.
+
+    Higher margin → more aggressive hedge (maximize MERGE profit).
+    Linear: margin * 15, clamped to [0.3, 0.9].
+    Examples: margin=0.02→0.3, 0.03→0.45, 0.05→0.75, 0.06+→0.9
+    """
+    return min(0.9, max(0.3, merge_margin * 15))
+
+
 def _ev_per_dollar(expected_win_rate: float, price: float) -> float:
     """Expected value per dollar: w(p) / p - 1."""
     if price <= 0:
@@ -349,17 +359,17 @@ def scan_calibration_bothside(
     balance_usd: float | None = None,
     liquidity_map: dict[str, LiquiditySnapshot] | None = None,
     max_combined_vwap: float = 0.995,
-    hedge_kelly_mult: float = 0.5,
-    hedge_max_price: float = 0.55,
+    hedge_kelly_mult: float = 0.5,  # base fallback (動的乗数のフォールバック)
+    hedge_max_price: float | None = None,  # DEPRECATED: ignored
 ) -> list[BothsideOpportunity]:
-    """Calibration scan returning both-side opportunities.
+    """Calibration scan returning both-side opportunities (MERGE-first).
 
     For each game:
       1. Evaluate both outcomes (same logic as scan_calibration)
       2. Collect all positive-EV candidates
       3. Sort by EV → [0]=directional, [1]=hedge candidate
-      4. Hedge guard: positive EV, price <= max, combined < threshold
-      5. Return BothsideOpportunity with hedge=None if guard fails
+      4. Hedge guard: combined < max_combined_vwap only (MERGE-first)
+      5. Dynamic sizing based on MERGE margin
     """
     _curve = get_default_curve()
     results: list[BothsideOpportunity] = []
@@ -463,14 +473,13 @@ def scan_calibration_bothside(
             hedge_candidate = candidates[1]
             combined = directional.poly_price + hedge_candidate.poly_price
 
-            # Hedge ガード
-            if (
-                hedge_candidate.ev_per_dollar > 0
-                and hedge_candidate.poly_price <= hedge_max_price
-                and combined < max_combined_vwap
-            ):
+            # MERGE-first: 安全弁 (combined < max_combined_vwap) のみ。
+            # 実際の価格判定は executor が注文板ベースで行う。
+            if combined < max_combined_vwap:
                 hedge = hedge_candidate
-                hedge_pos_usd = hedge.position_usd * hedge_kelly_mult
+                merge_margin = 1.0 - combined
+                effective_mult = _hedge_margin_multiplier(merge_margin)
+                hedge_pos_usd = hedge.position_usd * effective_mult
 
         results.append(
             BothsideOpportunity(

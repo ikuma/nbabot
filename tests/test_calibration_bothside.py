@@ -1,4 +1,4 @@
-"""Tests for scan_calibration_bothside (Phase B)."""
+"""Tests for scan_calibration_bothside (Phase B / Phase H: MERGE-first)."""
 
 from __future__ import annotations
 
@@ -57,15 +57,6 @@ class TestScanCalibrationBothside:
         assert len(results) == 1
         assert results[0].hedge is None
 
-    def test_hedge_none_when_price_too_high(self, monkeypatch):
-        """Hedge price > hedge_max_price → hedge is None."""
-        _patch_settings(monkeypatch)
-        # 0.35 → directional, 0.65 → hedge candidate but 0.65 > 0.55 max
-        ml = _make_ml(["Knicks", "Celtics"], [0.35, 0.65])
-        results = scan_calibration_bothside([ml], hedge_max_price=0.55)
-        assert len(results) == 1
-        assert results[0].hedge is None
-
     def test_hedge_none_when_no_ev(self, monkeypatch):
         """Only one outcome has positive EV → hedge is None."""
         _patch_settings(monkeypatch)
@@ -84,17 +75,6 @@ class TestScanCalibrationBothside:
         opp = results[0]
         if opp.hedge is not None:
             assert opp.directional.ev_per_dollar >= opp.hedge.ev_per_dollar
-
-    def test_hedge_sizing_applies_mult(self, monkeypatch):
-        """Hedge position_usd = original * hedge_kelly_mult."""
-        _patch_settings(monkeypatch)
-        ml = _make_ml(["Knicks", "Celtics"], [0.35, 0.50])
-        results = scan_calibration_bothside([ml], hedge_kelly_mult=0.5)
-        assert len(results) == 1
-        opp = results[0]
-        if opp.hedge is not None:
-            expected = opp.hedge.position_usd * 0.5
-            assert opp.hedge_position_usd == pytest.approx(expected, rel=0.01)
 
     def test_inactive_skipped(self, monkeypatch):
         """Inactive market → no results."""
@@ -122,3 +102,47 @@ class TestScanCalibrationBothside:
         results = scan_calibration_bothside([ml1, ml2])
         assert len(results) == 2
         assert results[0].directional.ev_per_dollar >= results[1].directional.ev_per_dollar
+
+    # --- Phase H: MERGE-first tests ---
+
+    def test_hedge_set_when_above_old_max_price(self, monkeypatch):
+        """Hedge price > old 0.55 cap → still set (MERGE-first)."""
+        _patch_settings(monkeypatch)
+        # dir=0.35, hedge=0.60, combined=0.95 < 0.995 → hedge set
+        ml = _make_ml(["Knicks", "Celtics"], [0.35, 0.60])
+        results = scan_calibration_bothside([ml])
+        assert results[0].hedge is not None
+
+    def test_hedge_sizing_dynamic_margin(self, monkeypatch):
+        """High margin → high multiplier."""
+        _patch_settings(monkeypatch)
+        # 0.35+0.50=0.85, margin=0.15 → mult=min(0.9,0.15*15)=0.9
+        ml = _make_ml(["Knicks", "Celtics"], [0.35, 0.50])
+        results = scan_calibration_bothside([ml])
+        opp = results[0]
+        assert opp.hedge is not None
+        from src.strategy.calibration_scanner import _hedge_margin_multiplier
+
+        expected = opp.hedge.position_usd * _hedge_margin_multiplier(1.0 - opp.combined_price)
+        assert opp.hedge_position_usd == pytest.approx(expected, rel=0.01)
+
+    def test_deprecated_hedge_max_price_ignored(self, monkeypatch):
+        """Old hedge_max_price param is ignored."""
+        _patch_settings(monkeypatch)
+        ml = _make_ml(["Knicks", "Celtics"], [0.35, 0.60])
+        results = scan_calibration_bothside([ml], hedge_max_price=0.30)
+        assert results[0].hedge is not None  # 旧ロジックなら None
+
+    def test_hedge_margin_multiplier_low(self, monkeypatch):
+        """Low margin → low multiplier (0.3 floor)."""
+        _patch_settings(monkeypatch)
+        # 0.49+0.50=0.99, margin=0.01 → mult=max(0.3,0.01*15)=0.3
+        ml = _make_ml(["Knicks", "Celtics"], [0.49, 0.50])
+        results = scan_calibration_bothside([ml], max_combined_vwap=1.0)
+        opp = results[0]
+        assert opp.hedge is not None
+        from src.strategy.calibration_scanner import _hedge_margin_multiplier
+
+        assert _hedge_margin_multiplier(0.01) == pytest.approx(0.3)
+        expected = opp.hedge.position_usd * 0.3
+        assert opp.hedge_position_usd == pytest.approx(expected, rel=0.01)

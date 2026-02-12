@@ -62,6 +62,7 @@ Polymarket NBA キャリブレーション Bot。Polymarket の構造的ミス�
 | Q2 | 保守的サイジング改革 (連続不確実性ベース) | **完了** |
 | O | 注文実行改善 (Order Lifecycle Manager) | **完了** |
 | DCA2 | 目標保有量方式 DCA (Target-Holding) | **完了** |
+| H | MERGE-First Hedge 改革 (動的限界価格) | **完了** |
 | C | Total (O/U) マーケット校正 | 未着手 |
 | E | スケール + 本番運用 ($30-50K) | 未着手 |
 
@@ -373,13 +374,15 @@ Gamma Events API ──→ MoneylineMarket[] ──────────┤
 | `DCA_MIN_ORDER_USD` | No | DCA 最小発注額 USD (default: 1.0, 未満はスキップ) |
 | `BOTHSIDE_ENABLED` | No | 両サイドベット有効/無効 (default: true) |
 | `BOTHSIDE_MAX_COMBINED_VWAP` | No | combined VWAP 上限 (default: 0.995, MERGE 判定上限) |
-| `BOTHSIDE_TARGET_COMBINED` | No | hedge 指値算出基準 (default: 0.97, MERGE 利鞘 3%/share) |
+| `BOTHSIDE_TARGET_COMBINED` | No | DEPRECATED — executor が動的 MERGE-based pricing を使用 (default: 0.97) |
 | `BOTHSIDE_HEDGE_KELLY_MULT` | No | hedge 側 Kelly 乗数 (default: 0.5) |
 | `BOTHSIDE_HEDGE_DELAY_MIN` | No | directional→hedge 最小遅延 (分, default: 30) |
-| `BOTHSIDE_HEDGE_MAX_PRICE` | No | hedge 価格上限 (default: 0.55) |
+| `BOTHSIDE_HEDGE_MAX_PRICE` | No | DEPRECATED — scanner が常に hedge を返す (default: 0.55) |
 | `MERGE_ENABLED` | No | MERGE 有効/無効 (default: true, BOTHSIDE_ENABLED とは独立) |
 | `MERGE_MAX_COMBINED_VWAP` | No | MERGE 判定 combined VWAP 上限 (default: 0.998) |
 | `MERGE_MIN_PROFIT_USD` | No | MERGE 最低利益 (default: 0.10, gas 負け防止) |
+| `MERGE_EST_GAS_USD` | No | MERGE gas 見積もり USD (default: 0.05, Polygon 保守的) |
+| `MERGE_MIN_SHARES_FLOOR` | No | MERGE 最小想定 shares (default: 20.0, 動的 margin 算出の安全弁) |
 | `MERGE_GAS_BUFFER_GWEI` | No | gas price 上限 gwei (default: 50) |
 | `MERGE_MAX_RETRIES` | No | MERGE 失敗リトライ上限 (default: 3) |
 | `MERGE_CTF_ADDRESS` | No | CTF コントラクトアドレス (default: Polymarket CTF) |
@@ -458,7 +461,7 @@ Gamma Events API ──→ MoneylineMarket[] ──────────┤
 - LLM コスト: Opus 4.6 ($72/月), Sonnet 4.5 ($14/月), Haiku 4.5 ($5/月)。`LLM_MODEL` env で切替可能。
 - LLM-First Directional (Phase L2): LLM が directional を決定、校正は EV 安全弁のみ。Case A (hedge 存在→swap)、Case B (hedge=None→`evaluate_single_outcome()` で LLM 側を独立評価)。LLM 側にバンドなし or EV 非正 → 校正維持。
 - Below-Market Limit Orders (Phase L2): 全注文を `best_ask - 0.01` で発注 (メイカー注文)。手数料優遇 + 合計 < 1.0 が自然に成立 → MERGE 利益。fill は保証されないが NBA 価格変動 (±2-5c/7.5h) で高確率。
-- Hedge Target Pricing (Phase L2): `max_hedge = target_combined - dir_vwap` で上限を算出。`BOTHSIDE_TARGET_COMBINED` (default 0.97) で MERGE 利鞘 3%/share を確保。`hedge_max_price` は旧 at-market 発注の名残で、below-market limit では `target_combined` に一本化。hedge は「フリーオプション」: fill しなくても directional だけで +EV。
+- Hedge Target Pricing (Phase H): MERGE 経済性から動的に限界価格を算出: `max_hedge = 1.0 - dir_vwap - min_margin` (min_margin = (gas + min_profit) / min_shares)。旧 `BOTHSIDE_TARGET_COMBINED` (固定 0.97) は DEPRECATED。`BOTHSIDE_HEDGE_MAX_PRICE` も DEPRECATED — scanner は combined < max_combined_vwap の安全弁のみで常に hedge を返す。hedge は「フリーオプション」: fill しなくても directional だけで +EV。EV 非正の hedge も MERGE-only パス (directional コストベースサイジング) で進行。`_hedge_margin_multiplier(merge_margin)` で MERGE 利鞘に応じた動的 Kelly 乗数 [0.3, 0.9] を適用。
 - hedge ジョブは常時作成 (bothside_opp の hedge=None でも)。実行時に注文板を取得し target-based pricing で発注可否を判定。
 - LLM プロンプトキャッシング (Phase L-cache): `SHARED_KNOWLEDGE_BASE` (~4K+ tokens) を `cache_control: {"type": "ephemeral"}` で 3 ペルソナ間共有。2 回目以降はキャッシュヒットで入力トークン ~60% 削減。ナレッジベースには NBA 統計予測因子・予測市場バイアス・確率推定ガイドラインを含むが、校正テーブル・Kelly 分数等の戦略パラメータは含めない。
 - Telegram 通知 (Phase N): 各 executor (job/hedge/dca/merge) が発注成功時に即座に `notify_*()` で Telegram 通知。全通知は try/except で wrap、失敗しても処理に影響なし。`escape_md()` で Markdown V1 特殊文字をエスケープ。tick summary は DB 参照 (`get_signal_by_id`) でチーム名・価格・エッジを enrichment。決済通知にはスコア・ROI を追記。`_preflight_check()` は `src/scheduler/preflight.py` に分離 (500 行対策)。

@@ -115,13 +115,14 @@ def _compute_live_dca_order_price(
     except Exception:
         logger.warning("DCA order book fetch failed for job %d", job.id)
 
-    # hedge DCA: target combined で上限制限
+    # hedge DCA: MERGE 経済性ベースの動的上限制限 (Phase H)
     if job.job_side == "hedge" and settings.bothside_enabled:
-        dir_vwap, target_combined = _compute_directional_vwap_and_target(
-            job.paired_job_id, db_path
-        )
+        dir_vwap = _get_directional_vwap(job.paired_job_id, db_path)
         if dir_vwap > 0:
-            max_hedge = target_combined - dir_vwap
+            _gp = settings.merge_est_gas_usd + settings.merge_min_profit_usd
+            _min_m = _gp / settings.merge_min_shares_floor
+            max_hedge = 1.0 - dir_vwap - _min_m
+            max_hedge = min(max_hedge, settings.bothside_max_combined_vwap - dir_vwap)
             dca_order_price = apply_price_ceiling(dca_order_price, max_hedge)
 
     return dca_order_price
@@ -210,20 +211,22 @@ def process_dca_active_jobs(
             logger.warning("Cannot find price for %s in job %d", target_team, job.id)
             continue
 
-        # Hedge DCA: combined target フィルター
+        # Hedge DCA: MERGE 経済性ベースの動的限界価格フィルター
         if job.job_side == "hedge" and settings.bothside_enabled:
             _dir_vwap, _target_combined = _compute_directional_vwap_and_target(
                 job.paired_job_id, path
             )
             if _dir_vwap > 0:
-                _max_hedge = _target_combined - _dir_vwap
+                _gp = settings.merge_est_gas_usd + settings.merge_min_profit_usd
+                _min_margin = _gp / settings.merge_min_shares_floor
+                _max_hedge = 1.0 - _dir_vwap - _min_margin
+                _max_hedge = min(_max_hedge, settings.bothside_max_combined_vwap - _dir_vwap)
                 if current_price > _max_hedge:
                     logger.debug(
-                        "Hedge DCA skip: price %.3f > max_hedge %.3f (dir_vwap=%.3f target=%.3f)",
+                        "Hedge DCA skip: price %.3f > max_hedge %.3f (dir_vwap=%.3f)",
                         current_price,
                         _max_hedge,
                         _dir_vwap,
-                        _target_combined,
                     )
                     continue
 
