@@ -47,6 +47,41 @@ NBA_ML_CALIBRATION: list[CalibrationBand] = [
 ]
 
 
+def load_calibration_table(path: str | None = None) -> list[CalibrationBand]:
+    """Load calibration table from JSON file, or fall back to hardcoded NBA_ML_CALIBRATION.
+
+    Args:
+        path: Path to a JSON file with calibration band data.
+              If None, returns the hardcoded default.
+    """
+    if path is None:
+        return NBA_ML_CALIBRATION
+
+    import json
+    from pathlib import Path as _P
+
+    p = _P(path)
+    if not p.exists():
+        return NBA_ML_CALIBRATION
+
+    try:
+        with open(p) as f:
+            data = json.load(f)
+        bands = []
+        for b in data:
+            bands.append(CalibrationBand(
+                price_lo=float(b["price_lo"]),
+                price_hi=float(b["price_hi"]),
+                expected_win_rate=float(b["expected_win_rate"]),
+                historical_roi_pct=float(b.get("historical_roi_pct", 0)),
+                sample_size=int(b.get("sample_size", 0)),
+                confidence=b.get("confidence", "low"),
+            ))
+        return bands if bands else NBA_ML_CALIBRATION
+    except (json.JSONDecodeError, KeyError, TypeError, ValueError):
+        return NBA_ML_CALIBRATION
+
+
 def lookup_band(
     price: float, table: list[CalibrationBand] = NBA_ML_CALIBRATION
 ) -> CalibrationBand | None:

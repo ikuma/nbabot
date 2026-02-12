@@ -107,6 +107,44 @@ class TestCalcSignalPnlWithMerge:
         assert pnl_merge == pytest.approx(pnl_plain)
 
 
+class TestCalcSignalPnlWithFee:
+    """Fee deduction in calc_signal_pnl (Phase M3)."""
+
+    def test_fee_deducted_from_win(self):
+        pnl_no_fee = calc_signal_pnl(won=True, kelly_size=25.0, poly_price=0.40)
+        pnl_with_fee = calc_signal_pnl(won=True, kelly_size=25.0, poly_price=0.40, fee_usd=0.50)
+        assert pnl_with_fee == pytest.approx(pnl_no_fee - 0.50)
+
+    def test_fee_deducted_from_loss(self):
+        pnl_no_fee = calc_signal_pnl(won=False, kelly_size=25.0, poly_price=0.40)
+        pnl_with_fee = calc_signal_pnl(won=False, kelly_size=25.0, poly_price=0.40, fee_usd=0.10)
+        assert pnl_with_fee == pytest.approx(pnl_no_fee - 0.10)
+
+    def test_fee_zero_backward_compat(self):
+        """fee_usd=0 gives same result as not passing it."""
+        pnl1 = calc_signal_pnl(won=True, kelly_size=10.0, poly_price=0.50)
+        pnl2 = calc_signal_pnl(won=True, kelly_size=10.0, poly_price=0.50, fee_usd=0.0)
+        assert pnl1 == pytest.approx(pnl2)
+
+    def test_fee_with_merge(self):
+        """Fee deducted even when merge recovery is present."""
+        fee = 0.25
+        pnl = calc_signal_pnl(
+            won=False, kelly_size=20.0, poly_price=0.50,
+            shares_merged=30.0, merge_recovery_usd=18.0, fee_usd=fee,
+        )
+        pnl_no_fee = calc_signal_pnl(
+            won=False, kelly_size=20.0, poly_price=0.50,
+            shares_merged=30.0, merge_recovery_usd=18.0,
+        )
+        assert pnl == pytest.approx(pnl_no_fee - fee)
+
+    def test_fee_with_zero_price(self):
+        """Fee still deducted when price is zero."""
+        pnl = calc_signal_pnl(won=True, kelly_size=10.0, poly_price=0.0, fee_usd=0.50)
+        assert pnl == pytest.approx(-10.0 - 0.50)
+
+
 class TestBothsideMergeIntegration:
     """Integration: bothside merge where dir loses, merge recovers partial loss."""
 

@@ -18,18 +18,19 @@ def calc_signal_pnl(
     fill_price: float | None = None,
     shares_merged: float = 0.0,
     merge_recovery_usd: float = 0.0,
+    fee_usd: float = 0.0,
 ) -> float:
     """Per-signal PnL (self-contained, no group dependency).
 
-    PnL = (remaining_shares × settlement_price) + merge_recovery_usd - cost
+    PnL = (remaining_shares × settlement_price) + merge_recovery_usd - cost - fee_usd
     """
     price = fill_price if fill_price is not None else poly_price
     if price <= 0:
-        return -kelly_size
+        return -kelly_size - fee_usd
     shares_bought = kelly_size / price
     shares_remaining = shares_bought - shares_merged
     settlement_value = shares_remaining * (1.0 if won else 0.0)
-    return settlement_value + merge_recovery_usd - kelly_size
+    return settlement_value + merge_recovery_usd - kelly_size - fee_usd
 
 
 def _calc_pnl(

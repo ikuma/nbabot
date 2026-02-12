@@ -19,6 +19,11 @@ from src.connectors.polymarket import MoneylineMarket
 from src.sizing.liquidity import LiquiditySnapshot
 from src.sizing.position_sizer import calculate_position_size
 from src.strategy.calibration import is_in_sweet_spot, lookup_band
+from src.strategy.calibration_curve import (
+    WinRateEstimate,
+    _confidence_from_sample_size,
+    get_default_curve,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +47,8 @@ class CalibrationOpportunity:
     position_usd: float
     side: str = "BUY"
     book_prob: float | None = None  # optional bookmaker validation
+    # Continuous curve diagnostic (Phase Q)
+    point_estimate_wr: float | None = None
     # Liquidity-aware sizing fields
     liquidity_score: str = "unknown"
     constraint_binding: str = "kelly"
@@ -70,6 +77,19 @@ def _calibration_kelly(
     return max(0.0, kelly_full) * frac
 
 
+def _confidence_multiplier(est: WinRateEstimate) -> float:
+    """Continuous confidence scaling based on CI width.
+
+    Replaces the hard sweet-spot boundary (0.5x at price > 0.55).
+    Uses lower_bound / point_estimate ratio: tighter CI → higher multiplier.
+    """
+    if est.point_estimate <= 0:
+        return 0.5
+    ratio = est.lower_bound / est.point_estimate
+    # Clip to [0.5, 1.0] — 0.5 matches old minimum
+    return max(0.5, min(1.0, ratio))
+
+
 def _ev_per_dollar(expected_win_rate: float, price: float) -> float:
     """Expected value per dollar: w(p) / p - 1."""
     if price <= 0:
@@ -89,9 +109,10 @@ def scan_calibration(
       2. Require calibration band exists (table coverage: 0.25-0.95)
       3. Require positive EV (expected_win_rate > poly_price)
       4. Select the outcome with higher EV (one signal per game)
-      5. Kelly sizing (sweet spot = full, outside = 0.5x)
+      5. Kelly sizing with continuous confidence multiplier (CI-based)
       6. Apply 3-layer constraints (kelly, capital, liquidity) if provided
     """
+    _curve = get_default_curve()
     opportunities: list[CalibrationOpportunity] = []
 
     for ml in moneylines:
@@ -112,12 +133,14 @@ def scan_calibration(
                 logger.debug("Skipping %s: invalid price %.3f", outcome_name, price)
                 continue
 
-            band = lookup_band(price)
-            if band is None:
+            est = _curve.estimate(price)
+            if est is None:
                 logger.debug("No calibration band for %s @ %.3f", outcome_name, price)
                 continue
 
-            expected_wr = band.expected_win_rate
+            # 保守的推定 (Beta 下限) を使用
+            expected_wr = est.lower_bound
+            point_wr = est.point_estimate
             edge = expected_wr - price  # raw edge (0-1 scale)
             edge_pct = edge * 100
 
@@ -134,17 +157,20 @@ def scan_calibration(
                 )
                 continue
 
-            # Kelly sizing
+            # Kelly sizing with continuous confidence scaling
             kelly = _calibration_kelly(expected_wr, price)
-            sweet = is_in_sweet_spot(price, settings.sweet_spot_lo, settings.sweet_spot_hi)
+            confidence_mult = _confidence_multiplier(est)
+            kelly *= confidence_mult
 
-            # sweet spot 外はサイズ 0.5x
-            if not sweet:
-                kelly *= 0.5
+            # メタデータ用 (DB 互換 — Kelly サイジングからは分離)
+            sweet = is_in_sweet_spot(price, settings.sweet_spot_lo, settings.sweet_spot_hi)
 
             kelly_usd = min(kelly * settings.max_position_usd * 10, settings.max_position_usd)
 
-            band_label = f"{band.price_lo:.2f}-{band.price_hi:.2f}"
+            # メタデータは既存バンドから (DB 互換)
+            band = lookup_band(price)
+            band_label = f"{band.price_lo:.2f}-{band.price_hi:.2f}" if band else f"{price:.2f}"
+            band_confidence = _confidence_from_sample_size(est.effective_sample_size)
 
             # 3層制約の適用
             liq_score = "unknown"
@@ -191,8 +217,9 @@ def scan_calibration(
                 ev_per_dollar=ev,
                 price_band=band_label,
                 in_sweet_spot=sweet,
-                band_confidence=band.confidence,
+                band_confidence=band_confidence,
                 position_usd=position_usd,
+                point_estimate_wr=point_wr,
                 liquidity_score=liq_score,
                 constraint_binding=binding,
                 recommended_execution=rec_exec,
@@ -234,23 +261,29 @@ def evaluate_single_outcome(
     if price <= 0 or price >= 1:
         return None
 
-    band = lookup_band(price)
-    if band is None:
+    _curve = get_default_curve()
+    est = _curve.estimate(price)
+    if est is None:
         return None
 
-    expected_wr = band.expected_win_rate
+    expected_wr = est.lower_bound
+    point_wr = est.point_estimate
     ev = _ev_per_dollar(expected_wr, price)
     if ev <= 0:
         return None
 
     kelly = _calibration_kelly(expected_wr, price)
+    confidence_mult = _confidence_multiplier(est)
+    kelly *= confidence_mult
+
     sweet = is_in_sweet_spot(price, settings.sweet_spot_lo, settings.sweet_spot_hi)
-    if not sweet:
-        kelly *= 0.5
 
     kelly_usd = min(kelly * settings.max_position_usd * 10, settings.max_position_usd)
     edge_pct = (expected_wr - price) * 100
-    band_label = f"{band.price_lo:.2f}-{band.price_hi:.2f}"
+
+    band = lookup_band(price)
+    band_label = f"{band.price_lo:.2f}-{band.price_hi:.2f}" if band else f"{price:.2f}"
+    band_confidence = _confidence_from_sample_size(est.effective_sample_size)
 
     # 3層制約
     liq_score = "unknown"
@@ -287,8 +320,9 @@ def evaluate_single_outcome(
         ev_per_dollar=ev,
         price_band=band_label,
         in_sweet_spot=sweet,
-        band_confidence=band.confidence,
+        band_confidence=band_confidence,
         position_usd=position_usd,
+        point_estimate_wr=point_wr,
         liquidity_score=liq_score,
         constraint_binding=binding,
         recommended_execution=rec_exec,
@@ -327,6 +361,7 @@ def scan_calibration_bothside(
       4. Hedge guard: positive EV, price <= max, combined < threshold
       5. Return BothsideOpportunity with hedge=None if guard fails
     """
+    _curve = get_default_curve()
     results: list[BothsideOpportunity] = []
 
     for ml in moneylines:
@@ -343,23 +378,28 @@ def scan_calibration_bothside(
             if price <= 0 or price >= 1:
                 continue
 
-            band = lookup_band(price)
-            if band is None:
+            est = _curve.estimate(price)
+            if est is None:
                 continue
 
-            expected_wr = band.expected_win_rate
+            expected_wr = est.lower_bound
+            point_wr = est.point_estimate
             ev = _ev_per_dollar(expected_wr, price)
             if ev <= 0:
                 continue
 
             kelly = _calibration_kelly(expected_wr, price)
+            confidence_mult = _confidence_multiplier(est)
+            kelly *= confidence_mult
+
             sweet = is_in_sweet_spot(price, settings.sweet_spot_lo, settings.sweet_spot_hi)
-            if not sweet:
-                kelly *= 0.5
 
             kelly_usd = min(kelly * settings.max_position_usd * 10, settings.max_position_usd)
             edge_pct = (expected_wr - price) * 100
-            band_label = f"{band.price_lo:.2f}-{band.price_hi:.2f}"
+
+            band = lookup_band(price)
+            band_label = f"{band.price_lo:.2f}-{band.price_hi:.2f}" if band else f"{price:.2f}"
+            band_confidence = _confidence_from_sample_size(est.effective_sample_size)
 
             # 3層制約
             liq_score = "unknown"
@@ -399,8 +439,9 @@ def scan_calibration_bothside(
                     ev_per_dollar=ev,
                     price_band=band_label,
                     in_sweet_spot=sweet,
-                    band_confidence=band.confidence,
+                    band_confidence=band_confidence,
                     position_usd=position_usd,
+                    point_estimate_wr=point_wr,
                     liquidity_score=liq_score,
                     constraint_binding=binding,
                     recommended_execution=rec_exec,

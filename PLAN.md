@@ -40,14 +40,14 @@ lhtsports の P&L 深掘り分析 ($38.7M リスク → +$1.2M, ROI 3.11%) に�
 | 0.40-0.45 | 121 | 91.7% | 7.4% | high | sweet spot |
 | 0.45-0.50 | 162 | 93.8% | 5.9% | high | sweet spot |
 | 0.50-0.55 | 169 | 94.7% | 6.2% | high | sweet spot |
-| 0.55-0.60 | 141 | 95.7% | 4.0% | high | 0.5x Kelly |
-| 0.60-0.65 | 78 | 97.4% | 16.0% | medium | 0.5x Kelly |
-| 0.65-0.70 | 58 | 93.1% | 2.1% | medium | 0.5x Kelly |
-| 0.70-0.75 | 45 | 93.3% | 15.5% | medium | 0.5x Kelly |
-| 0.75-0.80 | 37 | 97.3% | 15.9% | low | 0.5x Kelly |
-| 0.80-0.85 | 33 | 100% | 17.4% | low | 0.5x Kelly |
-| 0.85-0.90 | 30 | 100% | 14.1% | low | 0.5x Kelly |
-| 0.90-0.95 | 22 | 100% | 8.8% | low | 0.5x Kelly |
+| 0.55-0.60 | 141 | 95.7% | 4.0% | high | CI-based (旧 0.5x) |
+| 0.60-0.65 | 78 | 97.4% | 16.0% | medium | CI-based (旧 0.5x) |
+| 0.65-0.70 | 58 | 93.1% | 2.1% | medium | CI-based (旧 0.5x) |
+| 0.70-0.75 | 45 | 93.3% | 15.5% | medium | CI-based (旧 0.5x) |
+| 0.75-0.80 | 37 | 97.3% | 15.9% | low | CI-based (旧 0.5x) |
+| 0.80-0.85 | 33 | 100% | 17.4% | low | CI-based (旧 0.5x) |
+| 0.85-0.90 | 30 | 100% | 14.1% | low | CI-based (旧 0.5x) |
+| 0.90-0.95 | 22 | 100% | 8.8% | low | CI-based (旧 0.5x) |
 
 **注意**: 上記勝率は lhtsports の DCA (ドルコスト平均法) 込みの数値。シングルエントリーでは勝率は低下する (DCA 97% vs シングル 66%)。
 
@@ -376,7 +376,7 @@ Phase L の LLM 分析を実戦投入可能な発注戦略に統合。3 つの�
 - **ゲーム発見**: NBA.com Scoreboard API (Odds API は bookmaker モードのみ)
 - **DB**: SQLite (`data/paper_trades.db`)
 - **通知**: Telegram Bot API
-- **CI**: pytest (458 tests) + ruff
+- **CI**: pytest (537 tests) + ruff
 
 ---
 
@@ -433,6 +433,86 @@ pnl = (remaining_shares × settlement_price) + merge_recovery_usd - cost
 5. **pnl_calc**: `calc_signal_pnl()` 関数追加 (既存関数は温存)
 6. **settler**: `auto_settle()` を per-signal settlement に簡素化。グループ/MERGE 分岐を廃止し、全シグナルを均一に `calc_signal_pnl()` で処理
 7. **テスト**: `test_calc_signal_pnl.py` — 11 テスト (no-merge, partial merge, full merge, DCA+merge 統合)
+
+---
+
+## Phase M: 指標定義と検証設計の監査可能化 ✅ 完了
+
+### 背景
+「勝率」の定義が複数箇所で混在し、校正テーブルの検証に forward-looking bias があった。取引費用も P&L に完全反映されていなかった。これらを修正し、「本当に優位性があるか」を誤認しない監査可能な基盤を構築。
+
+### Phase M1: 指標分解 — 完了
+3つの独立した指標を定義:
+- **試合的中率** (game_correct_rate): 試合の勝者を的中した割合 (`results.won`)
+- **損益正率** (trade_profit_rate): P&L > 0 で終わった取引の割合 (`results.pnl > 0`)
+- **MERGE 決済率** (merge_rate): MERGE で部分/全額回収された割合 (`signals.shares_merged > 0`)
+
+実装:
+- `src/analysis/metrics.py` (新規): `DecomposedMetrics` + `compute_decomposed_metrics()` + `format_decomposed_summary()`
+- `src/store/db.py`: `get_band_decomposed_stats()`, `get_results_with_signals()` 追加
+- `src/settlement/settler.py`: `AutoSettleSummary` に `profit_wins`, `profit_losses`, `merged_count` 追加
+- `src/analysis/report_generator.py`: Decomposed Metrics セクション追加
+- `src/risk/calibration_monitor.py`: `trade_profit` z-score 監視追加
+- `tests/test_metrics.py`: 8 テスト
+
+### Phase M2: 時系列分離バックテスト — 完了
+全データでテーブル構築→同データでバックテストの in-sample bias を排除するため、walk-forward 分離を実装。
+
+実装:
+- `src/strategy/calibration_builder.py` (新規): `build_calibration_from_conditions()`, `walk_forward_split()`, `evaluate_split()`
+- `src/strategy/calibration.py`: `load_calibration_table()` 追加 (JSON ファイル or ハードコードフォールバック)
+- `scripts/rebuild_calibration_and_backtest.py`: `--split` モード追加 (walk-forward 検証)
+- `tests/test_calibration_builder.py`: 16 テスト
+
+### Phase M3: 取引費用の計上 — 完了
+現在は maker fee=0 で P&L 計算は実質正確だが、「fee=0 であることを検証可能にする監査証跡」を構築。
+
+実装:
+- `src/store/schema.py`: `fee_rate_bps`, `fee_usd` カラム追加
+- `src/store/db.py`: `update_signal_fee()` 追加
+- `src/store/models.py`: `SignalRecord` に `fee_rate_bps`, `fee_usd` フィールド追加
+- `src/settlement/pnl_calc.py`: `calc_signal_pnl()` に `fee_usd` パラメータ追加
+- `src/connectors/ctf.py`: `get_matic_usd_price()` (CoinGecko + フォールバック)
+- `src/connectors/polymarket.py`: `extract_fee_rate_bps()` ヘルパー追加
+- `src/scheduler/job_executor.py`, `hedge_executor.py`, `dca_executor.py`: fee 記録呼び出し追加
+- `tests/test_calc_signal_pnl.py`: fee テスト 5 件追加
+- `tests/test_fee_accounting.py`: 6 テスト
+
+### Phase S: 期待P&L vs 実現P&L トラッカー — 完了
+校正テーブルの期待 EV と実現 P&L の乖離を月次/週次で追跡し、エッジの減衰を検出。
+
+実装:
+- `src/analysis/expectation_tracker.py` (新規): `ExpectationGap` + `compute_expectation_gaps()` + `format_expectation_report()`
+- `src/analysis/report_generator.py`: Expected vs Realized PnL セクション追加 (乖離拡大時に警告表示)
+- `tests/test_expectation_tracker.py`: 15 テスト
+
+### Phase Q: 連続校正カーブ + 不確実性定量化 — 完了
+離散 5 セントバンドの問題 (単調性違反、小サンプル過信、バンド境界の不連続性、不確実性無視) を解決。
+Isotonic Regression (PAVA) + PCHIP 補間 + Beta 事後分布で連続・単調・保守的な price→win_rate 関数を構築。
+
+実装:
+- `src/strategy/calibration_curve.py` (新規): `ContinuousCalibration` + `WinRateEstimate` + `get_default_curve()`
+- `src/strategy/calibration_scanner.py`: `lookup_band()` → `curve.estimate()` に切替 (3 関数)
+- `src/scheduler/hedge_executor.py`: hedge EV 再検証を連続カーブに切替
+- `src/strategy/calibration_builder.py`: `build_continuous_from_conditions()` + `evaluate_split_continuous()` 追加
+- `src/risk/calibration_monitor.py`: `compute_continuous_drift()` 追加
+- `src/config.py`: `calibration_confidence_level` (default 0.90) 追加
+- `scripts/rebuild_calibration_and_backtest.py`: `--continuous` フラグ追加
+- `pyproject.toml`: `scipy>=1.12` 追加
+- `tests/test_calibration_curve.py`: 30 テスト
+
+### Phase Q2: 保守的サイジング改革 (連続不確実性ベース) — 完了
+Phase Q の連続校正カーブを活用し、2 つの残存問題を解決:
+
+1. **固定スイートスポット境界の撤廃**: 価格 0.55 境界の `if not sweet: kelly *= 0.5` を、連続的な `_confidence_multiplier(est)` に置換。CI 幅 (lower_bound / point_estimate) で [0.5, 1.0] の乗数を算出。高勝率・高サンプルバンドの不当な過小サイジングを修正。`in_sweet_spot` はメタデータとして温存。
+2. **DCA 未約定エクスポージャーの計上**: `get_pending_dca_exposure()` で dca_active ジョブの残りスライスを潜在エクスポージャーとして集計。preflight チェックで placed + pending DCA の合算で上限判定。
+
+実装:
+- `src/strategy/calibration_scanner.py`: `_confidence_multiplier()` 追加 + 3 関数の sweet spot ロジック置換
+- `src/store/db.py`: `get_pending_dca_exposure()` 追加
+- `src/scheduler/preflight.py`: pending DCA exposure 加算
+- `tests/test_calibration_scanner.py`: `TestConfidenceMultiplier` 追加 + sizing テスト更新
+- `tests/test_preflight.py`: pending DCA exposure テスト (新規)
 
 ---
 

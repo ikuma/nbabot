@@ -539,5 +539,244 @@ def main():
     print("\n完了。")
 
 
+def walk_forward_mode(train_months: int = 6, test_months: int = 2, step_months: int = 1):
+    """Walk-forward split mode (Phase M2): time-series separated validation."""
+    import sys
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+    from src.strategy.calibration_builder import (
+        evaluate_split,
+        walk_forward_split,
+    )
+
+    print("=" * 70)
+    print("Walk-Forward Calibration Validation (Phase M2)")
+    print("=" * 70)
+
+    print("\n[1] データ読み込み...")
+    trades, redeems, merges = load_data()
+    print(f"   TRADE: {len(trades):,} | REDEEM: {len(redeems):,} | MERGE: {len(merges):,}")
+
+    print("\n[2] NBA ML condition P&L 計算...")
+    conditions = build_condition_pnl(trades, redeems, merges)
+    conds_list = list(conditions.values())
+    print(f"   {len(conds_list):,} NBA ML conditions")
+
+    print(f"\n[3] Walk-Forward Split "
+          f"(train={train_months}mo, test={test_months}mo, step={step_months}mo)...")
+    splits = walk_forward_split(
+        conds_list,
+        train_months=train_months,
+        test_months=test_months,
+        step_months=step_months,
+    )
+    print(f"   {len(splits)} split(s) generated")
+
+    if not splits:
+        print("   Not enough data for walk-forward splits.")
+        return
+
+    print("\n   === Walk-Forward Results ===")
+    print(f"   {'#':>2} | {'Train':>21} | {'Test Period':>28} | "
+          f"{'N_sig':>5} | {'Expected':>10} | {'Realized':>10} | {'Gap $':>8} | {'Gap%':>6}")
+    print(f"   {'-'*2}-+-{'-'*21}-+-{'-'*28}-+-"
+          f"{'-'*5}-+-{'-'*10}-+-{'-'*10}-+-{'-'*8}-+-{'-'*6}")
+
+    all_results = []
+    for i, (train_result, test_conds) in enumerate(splits, 1):
+        ev = evaluate_split(train_result, test_conds)
+        all_results.append(ev)
+
+        train_label = f"{train_result.train_start}..{train_result.train_end}"
+        print(
+            f"   {i:>2} | {train_label:>21} | {ev['period']:>28} | "
+            f"{ev['n_signals']:>5} | ${ev['expected_pnl']:>8,.2f} | "
+            f"${ev['realized_pnl']:>8,.2f} | ${ev['gap_usd']:>6,.2f} | "
+            f"{ev['gap_pct']:>5.1f}%"
+        )
+
+    # Aggregate summary
+    total_expected = sum(r["expected_pnl"] for r in all_results)
+    total_realized = sum(r["realized_pnl"] for r in all_results)
+    total_gap = total_realized - total_expected
+    total_sigs = sum(r["n_signals"] for r in all_results)
+
+    print(f"\n   Total: {total_sigs} signals")
+    print(f"   Expected P&L: ${total_expected:,.2f}")
+    print(f"   Realized P&L: ${total_realized:,.2f}")
+    print(f"   Gap: ${total_gap:+,.2f} "
+          f"({total_gap / abs(total_expected) * 100:+.1f}%)" if total_expected else "")
+
+    # Save results to JSON
+    output_dir = PROJECT_ROOT / "data/reports/calibration-validation"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    output_file = output_dir / f"walk_forward_{train_months}m_{test_months}m.json"
+    with open(output_file, "w") as f:
+        json.dump(all_results, f, indent=2)
+    print(f"\n   Results saved to {output_file}")
+
+
+def continuous_mode(confidence_level: float = 0.90):
+    """Continuous calibration curve mode (Phase Q)."""
+    import sys
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+    from src.strategy.calibration import NBA_ML_CALIBRATION
+    from src.strategy.calibration_curve import ContinuousCalibration
+
+    print("=" * 70)
+    print("Continuous Calibration Curve (Phase Q)")
+    print("=" * 70)
+
+    print(f"\n[1] ハードコードテーブルから連続カーブをフィット (confidence={confidence_level})...")
+    curve = ContinuousCalibration.from_bands(NBA_ML_CALIBRATION, confidence_level)
+    print(f"   Knots: {len(curve.knot_prices)}")
+    print(f"   Price range: [{curve._price_lo:.2f}, {curve._price_hi:.2f}]")
+    print(f"   N observations: {curve.n_observations}")
+
+    print("\n[2] PAVA 補正前後の比較")
+    hdr = (f"   {'Band':>12} | {'N':>5} | {'Original':>8} | "
+           f"{'PAVA':>8} | {'Lower':>8} | {'Upper':>8} | {'Delta':>6}")
+    print(hdr)
+    sep = f"   {'-'*12}-+-{'-'*5}-+-{'-'*8}-+-{'-'*8}-+-{'-'*8}-+-{'-'*8}-+-{'-'*6}"
+    print(sep)
+
+    for i, band in enumerate(NBA_ML_CALIBRATION):
+        mid = (band.price_lo + band.price_hi) / 2
+        label = f"{band.price_lo:.2f}-{band.price_hi:.2f}"
+        original = band.expected_win_rate
+        pava = curve.knot_point_estimates[i]
+        lower = curve.knot_lower_bounds[i]
+        upper = curve.knot_upper_bounds[i]
+        delta = pava - original
+
+        marker = " <-- PAVA 補正" if abs(delta) > 0.001 else ""
+        print(
+            f"   {label:>12} | {band.sample_size:>5} | "
+            f"{original*100:>7.1f}% | {pava*100:>7.1f}% | "
+            f"{lower*100:>7.1f}% | {upper*100:>7.1f}% | "
+            f"{delta*100:>+5.1f}%{marker}"
+        )
+
+    print("\n[3] 100% 勝率バンドの Beta 補正")
+    for band in NBA_ML_CALIBRATION:
+        if band.expected_win_rate >= 0.999:
+            mid = (band.price_lo + band.price_hi) / 2
+            est = curve.estimate(mid)
+            if est:
+                print(
+                    f"   {band.price_lo:.2f}-{band.price_hi:.2f} (N={band.sample_size}): "
+                    f"point={est.point_estimate*100:.1f}% "
+                    f"lower_{int(confidence_level*100)}={est.lower_bound*100:.1f}% "
+                    f"upper={est.upper_bound*100:.1f}%"
+                )
+
+    print("\n[4] 連続カーブの補間値 (5c 刻み)")
+    print(f"   {'Price':>6} | {'Point':>7} | {'Lower':>7} | {'Upper':>7} | {'ESS':>5}")
+    print(f"   {'-'*6}-+-{'-'*7}-+-{'-'*7}-+-{'-'*7}-+-{'-'*5}")
+    for p_int in range(20, 96, 5):
+        p = p_int / 100
+        est = curve.estimate(p)
+        if est:
+            print(
+                f"   {p:>6.2f} | {est.point_estimate*100:>6.1f}% | "
+                f"{est.lower_bound*100:>6.1f}% | {est.upper_bound*100:>6.1f}% | "
+                f"{est.effective_sample_size:>5.0f}"
+            )
+
+    # JSON 保存
+    output_dir = PROJECT_ROOT / "data/reports/calibration-validation"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    output_file = output_dir / "continuous_calibration.json"
+    with open(output_file, "w") as f:
+        json.dump(curve.to_dict(), f, indent=2)
+    print(f"\n   Curve saved to {output_file}")
+
+
+def continuous_walk_forward_mode(
+    train_months: int = 6,
+    test_months: int = 2,
+    step_months: int = 1,
+    confidence_level: float = 0.90,
+):
+    """Walk-forward with continuous curve comparison (Phase Q + M2)."""
+    import sys
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+    from src.strategy.calibration_builder import (
+        evaluate_split,
+        evaluate_split_continuous,
+        walk_forward_split,
+    )
+
+    print("=" * 70)
+    print("Walk-Forward: Discrete vs Continuous Calibration (Phase Q)")
+    print("=" * 70)
+
+    print("\n[1] データ読み込み...")
+    trades, redeems, merges = load_data()
+    conditions = build_condition_pnl(trades, redeems, merges)
+    conds_list = list(conditions.values())
+    print(f"   {len(conds_list):,} NBA ML conditions")
+
+    print(f"\n[2] Walk-Forward Split "
+          f"(train={train_months}mo, test={test_months}mo, step={step_months}mo)...")
+    splits = walk_forward_split(conds_list, train_months, test_months, step_months)
+    print(f"   {len(splits)} split(s)")
+
+    if not splits:
+        print("   Not enough data.")
+        return
+
+    print("\n   === Discrete vs Continuous Comparison ===")
+    print(f"   {'#':>2} | {'Period':>28} | {'D_Gap%':>7} | {'C_Gap%':>7} | {'Improved':>8}")
+    print(f"   {'-'*2}-+-{'-'*28}-+-{'-'*7}-+-{'-'*7}-+-{'-'*8}")
+
+    d_results = []
+    c_results = []
+    for i, (train_result, test_conds) in enumerate(splits, 1):
+        d_ev = evaluate_split(train_result, test_conds)
+        c_ev = evaluate_split_continuous(train_result, test_conds, confidence_level)
+        d_results.append(d_ev)
+        c_results.append(c_ev)
+
+        improved = "YES" if abs(c_ev["gap_pct"]) < abs(d_ev["gap_pct"]) else "no"
+        print(
+            f"   {i:>2} | {d_ev['period']:>28} | "
+            f"{d_ev['gap_pct']:>+6.1f}% | {c_ev['gap_pct']:>+6.1f}% | {improved:>8}"
+        )
+
+    # Aggregates
+    d_total_exp = sum(r["expected_pnl"] for r in d_results)
+    d_total_real = sum(r["realized_pnl"] for r in d_results)
+    c_total_exp = sum(r["expected_pnl"] for r in c_results)
+    c_total_real = sum(r["realized_pnl"] for r in c_results)
+
+    print(f"\n   Discrete:   Expected ${d_total_exp:,.2f} → Realized ${d_total_real:,.2f} "
+          f"(gap {(d_total_real-d_total_exp)/abs(d_total_exp)*100:+.1f}%)" if d_total_exp else "")
+    print(f"   Continuous: Expected ${c_total_exp:,.2f} → Realized ${c_total_real:,.2f} "
+          f"(gap {(c_total_real-c_total_exp)/abs(c_total_exp)*100:+.1f}%)" if c_total_exp else "")
+
+
 if __name__ == "__main__":
-    main()
+    import argparse
+
+    parser = argparse.ArgumentParser(description="校正テーブル再構築 + バックテスト")
+    parser.add_argument("--split", action="store_true", help="Walk-forward split mode (Phase M2)")
+    parser.add_argument("--continuous", action="store_true", help="Continuous curve mode (Phase Q)")
+    parser.add_argument("--train-months", type=int, default=6, help="Training window in months")
+    parser.add_argument("--test-months", type=int, default=2, help="Test window in months")
+    parser.add_argument("--step-months", type=int, default=1, help="Step size in months")
+    parser.add_argument("--confidence", type=float, default=0.90, help="Beta posterior confidence")
+    args = parser.parse_args()
+
+    if args.continuous and args.split:
+        continuous_walk_forward_mode(
+            args.train_months, args.test_months, args.step_months, args.confidence
+        )
+    elif args.continuous:
+        continuous_mode(args.confidence)
+    elif args.split:
+        walk_forward_mode(args.train_months, args.test_months, args.step_months)
+    else:
+        main()

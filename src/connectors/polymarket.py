@@ -375,6 +375,19 @@ def place_limit_buy(token_id: str, price: float, size_usd: float) -> dict:
     return {}  # unreachable, for type checker
 
 
+def extract_fee_rate_bps(order_status: dict) -> float:
+    """Extract fee_rate_bps from a CLOB order status response.
+
+    The SDK auto-resolves fee_rate_bps per token when creating orders.
+    This extracts it from the order status for audit logging.
+    Returns 0.0 if not available.
+    """
+    try:
+        return float(order_status.get("fee_rate_bps", 0))
+    except (ValueError, TypeError):
+        return 0.0
+
+
 def get_order_status(order_id: str) -> dict:
     """Get order status from CLOB."""
     client = _create_client(authenticated=True)

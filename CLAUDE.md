@@ -45,6 +45,12 @@ Polymarket NBA キャリブレーション Bot。Polymarket の構造的ミス�
 | L-cache | LLM プロンプトキャッシング (共有ナレッジベース) | **完了** |
 | N | Telegram 通知強化 (即時通知 + enrichment) | **完了** |
 | P | Per-Signal P&L 修正 (merge 回収 per-signal 配分) | **完了** |
+| M1 | 指標分解 (3 独立指標: 的中率/損益正率/MERGE率) | **完了** |
+| M2 | 時系列分離バックテスト (walk-forward validation) | **完了** |
+| M3 | 取引費用の計上 (fee 監査証跡) | **完了** |
+| S | 期待P&L vs 実現P&L トラッカー (エッジ減衰検出) | **完了** |
+| Q | 連続校正カーブ + 不確実性定量化 (Isotonic+PCHIP+Beta) | **完了** |
+| Q2 | 保守的サイジング改革 (連続不確実性ベース) | **完了** |
 | C | Total (O/U) マーケット校正 | 未着手 |
 | E | スケール + 本番運用 ($30-50K) | 未着手 |
 
@@ -63,7 +69,9 @@ nbabot/
 │   │   ├── polymarket.py             # Polymarket Gamma/CLOB API
 │   │   └── team_mapping.py           # チーム名 ↔ abbr ↔ slug 変換
 │   ├── strategy/
-│   │   ├── calibration.py            # 校正テーブル (CalibrationBand, lookup)
+│   │   ├── calibration.py            # 校正テーブル (CalibrationBand, lookup, load_calibration_table)
+│   │   ├── calibration_curve.py      # 連続校正カーブ (Isotonic+PCHIP+Beta, Phase Q)
+│   │   ├── calibration_builder.py    # 校正テーブル構築 + walk-forward 分離 (Phase M2)
 │   │   ├── calibration_scanner.py    # 校正ベーススキャナー (主戦略)
 │   │   ├── dca_strategy.py           # DCA 判定ロジック (時間/価格トリガー, VWAP 共通関数)
 │   │   ├── merge_strategy.py         # MERGE 判定純関数 (shares 計算, VWAP, ガード)
@@ -89,6 +97,8 @@ nbabot/
 │   │   └── position_sizer.py         # 3層制約サイジング (Kelly×残高×流動性)
 │   ├── analysis/
 │   │   ├── pnl.py                    # 純関数 P&L 計算 (condition/game 単位)
+│   │   ├── metrics.py                # 3 独立指標 (DecomposedMetrics — Phase M1)
+│   │   ├── expectation_tracker.py    # 期待P&L vs 実現P&L 月次追跡 (Phase S)
 │   │   ├── report_generator.py       # P&L レポート生成 (generate_report)
 │   │   └── strategy_profile.py       # 軽量戦略フィンガープリント (Sharpe, DD 等)
 │   ├── logging_config.py             # 構造化ログ (JSONFormatter, setup_logging)
@@ -302,6 +312,7 @@ Gamma Events API ──→ MoneylineMarket[] ──────────┤
 | `STRATEGY_MODE` | No | `calibration` (default) / `bookmaker` |
 | `SWEET_SPOT_LO` | No | スイートスポット下限 (default: 0.20, フル Kelly) |
 | `SWEET_SPOT_HI` | No | スイートスポット上限 (default: 0.55, 超えると 0.5x Kelly) |
+| `CALIBRATION_CONFIDENCE_LEVEL` | No | 連続カーブの Beta 事後分布下限パーセンタイル (default: 0.90) |
 | `MIN_EDGE_PCT` | No | bookmaker モード最小エッジ閾値 % (default: 1.0) |
 | `KELLY_FRACTION` | No | Kelly 分数 (default: 0.25) |
 | `MAX_POSITION_USD` | No | 1 取引最大額 (default: 100) |
@@ -404,3 +415,9 @@ Gamma Events API ──→ MoneylineMarket[] ──────────┤
 - LLM プロンプトキャッシング (Phase L-cache): `SHARED_KNOWLEDGE_BASE` (~4K+ tokens) を `cache_control: {"type": "ephemeral"}` で 3 ペルソナ間共有。2 回目以降はキャッシュヒットで入力トークン ~60% 削減。ナレッジベースには NBA 統計予測因子・予測市場バイアス・確率推定ガイドラインを含むが、校正テーブル・Kelly 分数等の戦略パラメータは含めない。
 - Telegram 通知 (Phase N): 各 executor (job/hedge/dca/merge) が発注成功時に即座に `notify_*()` で Telegram 通知。全通知は try/except で wrap、失敗しても処理に影響なし。`escape_md()` で Markdown V1 特殊文字をエスケープ。tick summary は DB 参照 (`get_signal_by_id`) でチーム名・価格・エッジを enrichment。決済通知にはスコア・ROI を追記。`_preflight_check()` は `src/scheduler/preflight.py` に分離 (500 行対策)。
 - Per-Signal P&L (Phase P): `calc_signal_pnl()` で各シグナルが自己完結で P&L を算出。`shares_merged` + `merge_recovery_usd` を signals テーブルに保持。merge_executor が merge 成功時に per-signal 配分を書き込み、settler は全シグナルを均一に処理 (グループ/MERGE 分岐なし)。旧関数 (`_calc_pnl`, `_calc_dca_group_pnl`, `_calc_bothside_pnl`, `_calc_merge_pnl`) は後方互換のため温存。backfill マイグレーションで既存 merge データを signals に復元し、古い results を削除して再計算。
+- 指標分解 (Phase M1): 「勝率」を 3 つの独立指標に分解。game_correct_rate (試合的中), trade_profit_rate (P&L>0), merge_rate (MERGE 決済)。settler の `format_summary()` と report_generator の Decomposed Metrics セクションで表示。calibration_monitor は game_correct + trade_profit 両方の z-score でドリフト検出。
+- 時系列分離 (Phase M2): `calibration_builder.py` で walk-forward train/test 分離を実装。`load_calibration_table()` で JSON ファイルからの校正テーブル読み込みに対応 (ハードコードフォールバック)。`scripts/rebuild_calibration_and_backtest.py --split` で実行。
+- 取引費用 (Phase M3): signals テーブルに `fee_rate_bps`, `fee_usd` カラム追加。全 executor が発注後に fee を記録。`calc_signal_pnl()` に `fee_usd` パラメータ追加 (default 0 — 後方互換)。MATIC→USD 換算を CoinGecko 動的取得に変更 (フォールバック $0.40)。
+- 期待P&L トラッカー (Phase S): `expectation_tracker.py` で校正テーブル予測 EV と実現 P&L の月次乖離を算出。3 期間連続で乖離拡大 (gap_pct < -10%) の場合にエッジ減衰警告。report_generator に統合済み。
+- 連続校正カーブ (Phase Q): 離散 5c バンドを Isotonic Regression (PAVA) + PCHIP 補間 + Beta 事後分布で連続・単調・保守的な関数に置換。`calibration_curve.py` の `ContinuousCalibration` クラスが中核。`get_default_curve()` でハードコードテーブルから遅延初期化 (キャッシュ付き)。`expected_win_rate` に Beta 下限推定 (`lower_bound`) を入れることで downstream 変更ゼロ。小サンプル (N=22, 勝率 100%) の下限が ~93% に補正され、過大サイジングを防止。`CALIBRATION_CONFIDENCE_LEVEL` (default 0.90) で事後分布のパーセンタイルを制御。依存: scipy>=1.12。`--continuous` フラグで `rebuild_calibration_and_backtest.py` から連続カーブの診断出力が可能。
+- 保守的サイジング改革 (Phase Q2): 固定スイートスポット境界 (`if not sweet: kelly *= 0.5`) を連続的な `_confidence_multiplier(est)` に置換。CI 幅 (`lower_bound / point_estimate`) で Kelly 乗数を [0.5, 1.0] に連続スケーリング。Sweet spot 内は旧 1.0 → 新 0.85-0.94 (小サンプルバンドが自動縮小)、Sweet spot 外は旧 0.5 → 新 0.91-0.95 (高勝率バンドの不当な過小サイジングを修正)。`in_sweet_spot` は Kelly サイジングからは分離し、診断用メタデータのみに使用。`sweet_spot_lo/hi` 設定は温存 (DB メタデータ生成用)。DCA 未約定エクスポージャー: `get_pending_dca_exposure()` で dca_active ジョブの残りスライスを潜在エクスポージャーとして計上し、preflight チェックで placed + pending DCA の合算で上限判定。

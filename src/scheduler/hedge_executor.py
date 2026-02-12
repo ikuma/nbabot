@@ -210,17 +210,21 @@ def process_hedge_job(
             )
             return JobResult(job.id, job.event_slug, "skipped")
 
-        # Calibration EV 再検証 (order_price で)
-        from src.strategy.calibration import lookup_band
+        # Calibration EV 再検証 (order_price で — 連続カーブ)
+        from src.strategy.calibration_curve import (
+            _confidence_from_sample_size,
+            get_default_curve,
+        )
 
-        band = lookup_band(order_price)
-        if band is None:
+        _curve = get_default_curve()
+        est = _curve.estimate(order_price)
+        if est is None:
             update_job_status(
                 job.id, "skipped", error_message="No calibration band for hedge", db_path=db_path
             )
             return JobResult(job.id, job.event_slug, "skipped")
 
-        ev = _ev_per_dollar(band.expected_win_rate, order_price)
+        ev = _ev_per_dollar(est.lower_bound, order_price)
         if ev <= 0:
             update_job_status(
                 job.id, "skipped", error_message="Hedge EV non-positive", db_path=db_path
@@ -228,7 +232,7 @@ def process_hedge_job(
             return JobResult(job.id, job.event_slug, "skipped")
 
         # サイジング (LLM hedge_ratio 適用: Phase L)
-        kelly = _calibration_kelly(band.expected_win_rate, order_price)
+        kelly = _calibration_kelly(est.lower_bound, order_price)
         hedge_mult = settings.bothside_hedge_kelly_mult
         if settings.llm_analysis_enabled:
             from src.strategy.llm_cache import get_cached_analysis
@@ -276,11 +280,13 @@ def process_hedge_job(
         # DCA グループ ID (hedge 独立)
         dca_group_id = str(uuid.uuid4())
 
-        from src.strategy.calibration import is_in_sweet_spot
+        from src.strategy.calibration import is_in_sweet_spot, lookup_band
 
         sweet = is_in_sweet_spot(order_price, settings.sweet_spot_lo, settings.sweet_spot_hi)
-        band_label = f"{band.price_lo:.2f}-{band.price_hi:.2f}"
-        edge_pct = (band.expected_win_rate - order_price) * 100
+        _band = lookup_band(order_price)
+        band_label = f"{_band.price_lo:.2f}-{_band.price_hi:.2f}" if _band else f"{order_price:.2f}"
+        band_confidence = _confidence_from_sample_size(est.effective_sample_size)
+        edge_pct = (est.lower_bound - order_price) * 100
 
         signal_id = log_signal(
             game_title=ml.event_title,
@@ -294,10 +300,10 @@ def process_hedge_job(
             token_id=hedge_token_id,
             market_type="moneyline",
             calibration_edge_pct=edge_pct,
-            expected_win_rate=band.expected_win_rate,
+            expected_win_rate=est.lower_bound,
             price_band=band_label,
             in_sweet_spot=sweet,
-            band_confidence=band.confidence,
+            band_confidence=band_confidence,
             strategy_mode="calibration",
             dca_group_id=dca_group_id,
             dca_sequence=1,
@@ -336,6 +342,14 @@ def process_hedge_job(
                 )
                 logger.exception("Hedge job %d: order failed", job.id)
                 return JobResult(job.id, job.event_slug, "failed", signal_id, str(e))
+
+        # Fee 記録 (Phase M3 — 監査証跡)
+        try:
+            from src.store.db import update_signal_fee
+
+            update_signal_fee(signal_id, fee_rate_bps=0.0, fee_usd=0.0, db_path=db_path)
+        except Exception:
+            logger.debug("Fee recording failed for signal #%d", signal_id, exc_info=True)
 
         # DCA 有効なら dca_active に遷移
         if dca_max > 1:

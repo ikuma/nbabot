@@ -314,6 +314,25 @@ def get_todays_exposure(
         conn.close()
 
 
+def get_pending_dca_exposure(db_path: Path | str = DEFAULT_DB_PATH) -> float:
+    """Sum of planned but not-yet-placed DCA exposure.
+
+    For each dca_active job: (dca_max_entries - dca_entries_count) * dca_slice_size
+    """
+    conn = _connect(db_path)
+    try:
+        row = conn.execute(
+            """SELECT COALESCE(SUM(
+                (dca_max_entries - dca_entries_count) * dca_slice_size
+            ), 0) FROM trade_jobs
+            WHERE status = 'dca_active'
+              AND dca_slice_size > 0""",
+        ).fetchone()
+        return float(row[0])
+    finally:
+        conn.close()
+
+
 def get_placed_orders(
     db_path: Path | str = DEFAULT_DB_PATH,
 ) -> list[SignalRecord]:
@@ -866,6 +885,24 @@ def get_merge_eligible_groups(
         conn.close()
 
 
+def update_signal_fee(
+    signal_id: int,
+    fee_rate_bps: float = 0.0,
+    fee_usd: float = 0.0,
+    db_path: Path | str = DEFAULT_DB_PATH,
+) -> None:
+    """Record fee data for a signal (audit trail)."""
+    conn = _connect(db_path)
+    try:
+        conn.execute(
+            "UPDATE signals SET fee_rate_bps = ?, fee_usd = ? WHERE id = ?",
+            (fee_rate_bps, fee_usd, signal_id),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
 def update_signal_merge_data(
     signal_id: int,
     shares_merged: float,
@@ -1221,6 +1258,76 @@ def get_band_win_rates(
                 result[band]["losses"] += row["cnt"]
             result[band]["total"] += row["cnt"]
         return result
+    finally:
+        conn.close()
+
+
+def get_band_decomposed_stats(
+    db_path: Path | str = DEFAULT_DB_PATH,
+) -> dict[str, dict]:
+    """Get per-band decomposed stats (game_correct, trade_profitable, merge_settled).
+
+    Returns {band_label: {"game_correct": int, "trade_profitable": int,
+                           "merge_settled": int, "total": int}}.
+    """
+    conn = _connect(db_path)
+    try:
+        rows = conn.execute(
+            """SELECT s.price_band,
+                 SUM(CASE WHEN r.won = 1 THEN 1 ELSE 0 END) AS game_correct,
+                 SUM(CASE WHEN r.pnl > 0 THEN 1 ELSE 0 END) AS trade_profitable,
+                 SUM(CASE WHEN s.shares_merged > 0 THEN 1 ELSE 0 END) AS merge_settled,
+                 COUNT(*) AS total
+               FROM results r JOIN signals s ON s.id = r.signal_id
+               WHERE s.price_band IS NOT NULL AND s.price_band != ''
+                 AND s.strategy_mode = 'calibration'
+               GROUP BY s.price_band""",
+        ).fetchall()
+        result: dict[str, dict] = {}
+        for row in rows:
+            result[row["price_band"]] = {
+                "game_correct": int(row["game_correct"]),
+                "trade_profitable": int(row["trade_profitable"]),
+                "merge_settled": int(row["merge_settled"]),
+                "total": int(row["total"]),
+            }
+        return result
+    finally:
+        conn.close()
+
+
+def get_results_with_signals(
+    db_path: Path | str = DEFAULT_DB_PATH,
+) -> list[tuple[ResultRecord, SignalRecord]]:
+    """Get all (ResultRecord, SignalRecord) pairs for decomposed metrics."""
+    conn = _connect(db_path)
+    try:
+        rows = conn.execute(
+            """SELECT r.id AS r_id, r.signal_id, r.outcome, r.won,
+                      r.settlement_price, r.pnl, r.settled_at,
+                      s.*
+               FROM results r
+               JOIN signals s ON s.id = r.signal_id
+               ORDER BY r.settled_at DESC""",
+        ).fetchall()
+        pairs: list[tuple[ResultRecord, SignalRecord]] = []
+        for row in rows:
+            d = dict(row)
+            result = ResultRecord(
+                id=d["r_id"],
+                signal_id=d["signal_id"],
+                outcome=d["outcome"],
+                won=bool(d["won"]),
+                settlement_price=d["settlement_price"],
+                pnl=d["pnl"],
+                settled_at=d["settled_at"],
+            )
+            signal = SignalRecord(**{
+                k: v for k, v in d.items()
+                if k in SignalRecord.__dataclass_fields__
+            })
+            pairs.append((result, signal))
+        return pairs
     finally:
         conn.close()
 

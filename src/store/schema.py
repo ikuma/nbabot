@@ -360,6 +360,22 @@ def _backfill_merge_signal_data(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+# Fee tracking columns (Phase M3 — audit trail for maker/taker fees)
+_FEE_COLUMNS = [
+    ("fee_rate_bps", "REAL DEFAULT 0"),
+    ("fee_usd", "REAL DEFAULT 0"),
+]
+
+
+def _ensure_fee_columns(conn: sqlite3.Connection) -> None:
+    """Add fee tracking columns to signals table if they don't exist."""
+    existing = {row[1] for row in conn.execute("PRAGMA table_info(signals)").fetchall()}
+    for col_name, col_def in _FEE_COLUMNS:
+        if col_name not in existing:
+            conn.execute(f"ALTER TABLE signals ADD COLUMN {col_name} {col_def}")
+    conn.commit()
+
+
 LLM_ANALYSES_SQL = """
 CREATE TABLE IF NOT EXISTS llm_analyses (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -452,6 +468,7 @@ def _connect(db_path: Path | str = DEFAULT_DB_PATH) -> sqlite3.Connection:
     _ensure_dca_columns(conn)
     _ensure_bothside_columns(conn)
     _ensure_merge_columns(conn)
+    _ensure_fee_columns(conn)
     _ensure_risk_tables(conn)
     _ensure_llm_analyses_table(conn)
     _ensure_indexes(conn)

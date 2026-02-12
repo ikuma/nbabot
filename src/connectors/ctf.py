@@ -131,6 +131,32 @@ def _get_token_owner_address(w3) -> str:
     return _get_account(w3).address
 
 
+_MATIC_USD_FALLBACK = 0.40
+
+
+def get_matic_usd_price(fallback: float = _MATIC_USD_FALLBACK) -> float:
+    """Fetch current MATIC/USD price from CoinGecko simple price API.
+
+    Falls back to hardcoded estimate on any failure.
+    """
+    try:
+        import httpx
+
+        resp = httpx.get(
+            "https://api.coingecko.com/api/v3/simple/price",
+            params={"ids": "matic-network", "vs_currencies": "usd"},
+            timeout=5,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        price = float(data["matic-network"]["usd"])
+        if price > 0:
+            return price
+    except Exception:
+        logger.debug("CoinGecko MATIC price fetch failed, using fallback=%.2f", fallback)
+    return fallback
+
+
 def get_matic_balance() -> float:
     """Get MATIC balance for the configured wallet."""
     w3 = _get_web3()
@@ -259,8 +285,7 @@ def merge_positions(condition_id: str, amount: float) -> MergeResult:
         gas_used = receipt["gasUsed"]
         gas_cost_wei = gas_used * receipt.get("effectiveGasPrice", gas_price)
         gas_cost_matic = float(w3.from_wei(gas_cost_wei, "ether"))
-        # MATIC→USD 概算 (0.40 USD/MATIC — 実環境では oracle 参照)
-        gas_cost_usd = gas_cost_matic * 0.40
+        gas_cost_usd = gas_cost_matic * get_matic_usd_price()
 
         success = receipt["status"] == 1
         merged_shares = _wei_to_shares(amount_wei) if success else 0
@@ -415,7 +440,7 @@ def merge_positions_via_safe(condition_id: str, amount: float) -> MergeResult:
         gas_used = receipt["gasUsed"]
         gas_cost_wei = gas_used * receipt.get("effectiveGasPrice", gas_price)
         gas_cost_matic = float(w3.from_wei(gas_cost_wei, "ether"))
-        gas_cost_usd = gas_cost_matic * 0.40  # MATIC→USD 概算
+        gas_cost_usd = gas_cost_matic * get_matic_usd_price()
 
         success = receipt["status"] == 1
         merged_shares = _wei_to_shares(amount_wei) if success else 0

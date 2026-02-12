@@ -64,6 +64,9 @@ class SignalRecord:
     condition_id: str | None = None
     shares_merged: float = 0.0
     merge_recovery_usd: float = 0.0
+    # Fee tracking (Phase M3)
+    fee_rate_bps: float = 0.0
+    fee_usd: float = 0.0
 
 
 @dataclass

@@ -77,13 +77,31 @@ class AutoSettleSummary:
     def total_pnl(self) -> float:
         return sum(r.pnl for r in self.settled)
 
+    @property
+    def profit_wins(self) -> int:
+        """Trades with positive P&L."""
+        return sum(1 for r in self.settled if r.pnl > 0)
+
+    @property
+    def profit_losses(self) -> int:
+        """Trades with non-positive P&L."""
+        return sum(1 for r in self.settled if r.pnl <= 0)
+
+    @property
+    def merged_count(self) -> int:
+        """Trades that had MERGE recovery."""
+        return sum(1 for r in self.settled if r.is_merged)
+
     def format_summary(self) -> str:
         if not self.settled:
             return "Auto-settle: no signals settled."
         lines = [
             "*Auto-Settle Summary*",
             f"Settled: {len(self.settled)} | Skipped: {self.skipped}",
-            f"W/L: {self.wins}/{self.losses} | PnL: ${self.total_pnl:+.2f}",
+            f"Game W/L: {self.wins}/{self.losses} "
+            f"| Profit W/L: {self.profit_wins}/{self.profit_losses} "
+            f"| Merged: {self.merged_count} "
+            f"| PnL: ${self.total_pnl:+.2f}",
             "",
         ]
         for r in self.settled:
@@ -418,6 +436,7 @@ def auto_settle(
             fill_price=signal.fill_price,
             shares_merged=signal.shares_merged,
             merge_recovery_usd=signal.merge_recovery_usd,
+            fee_usd=getattr(signal, "fee_usd", 0.0) or 0.0,
         )
 
         if not dry_run:

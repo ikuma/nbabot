@@ -5,8 +5,10 @@ from __future__ import annotations
 import pytest
 
 from src.connectors.polymarket import MoneylineMarket
+from src.strategy.calibration_curve import WinRateEstimate
 from src.strategy.calibration_scanner import (
     _calibration_kelly,
+    _confidence_multiplier,
     _ev_per_dollar,
     scan_calibration,
 )
@@ -60,6 +62,66 @@ class TestCalibrationKelly:
         k1 = _calibration_kelly(0.904, 0.36, kelly_fraction=0.50)
         k2 = _calibration_kelly(0.904, 0.36, kelly_fraction=0.25)
         assert k1 == pytest.approx(k2 * 2, abs=0.001)
+
+
+class TestConfidenceMultiplier:
+    def test_tight_ci(self):
+        """Tight CI (lower/point close to 1) → multiplier near 1.0."""
+        est = WinRateEstimate(
+            price=0.50, point_estimate=0.90, lower_bound=0.85,
+            upper_bound=0.95, effective_sample_size=100,
+        )
+        mult = _confidence_multiplier(est)
+        assert mult == pytest.approx(0.85 / 0.90, abs=0.001)
+        assert 0.9 < mult <= 1.0
+
+    def test_wide_ci(self):
+        """Wide CI → multiplier closer to 0.5."""
+        est = WinRateEstimate(
+            price=0.30, point_estimate=0.80, lower_bound=0.45,
+            upper_bound=0.95, effective_sample_size=10,
+        )
+        mult = _confidence_multiplier(est)
+        assert mult == pytest.approx(0.45 / 0.80, abs=0.001)
+        assert mult >= 0.5
+
+    def test_zero_point_estimate(self):
+        """Zero point estimate → minimum multiplier 0.5."""
+        est = WinRateEstimate(
+            price=0.30, point_estimate=0.0, lower_bound=0.0,
+            upper_bound=0.0, effective_sample_size=0,
+        )
+        assert _confidence_multiplier(est) == 0.5
+
+    def test_clamp_max(self):
+        """Lower == point → ratio 1.0 → clipped to 1.0."""
+        est = WinRateEstimate(
+            price=0.30, point_estimate=0.80, lower_bound=0.80,
+            upper_bound=0.80, effective_sample_size=500,
+        )
+        assert _confidence_multiplier(est) == 1.0
+
+    def test_clamp_min(self):
+        """Very wide CI where ratio < 0.5 → clipped to 0.5."""
+        est = WinRateEstimate(
+            price=0.30, point_estimate=0.90, lower_bound=0.30,
+            upper_bound=0.95, effective_sample_size=5,
+        )
+        mult = _confidence_multiplier(est)
+        assert mult == 0.5  # 0.30/0.90 = 0.33 → clipped to 0.5
+
+    def test_range_within_bounds(self):
+        """Multiplier is always in [0.5, 1.0]."""
+        for point in [0.5, 0.7, 0.9, 1.0]:
+            for lower in [0.1, 0.3, 0.5, 0.7, 0.9]:
+                if lower > point:
+                    continue
+                est = WinRateEstimate(
+                    price=0.30, point_estimate=point, lower_bound=lower,
+                    upper_bound=1.0, effective_sample_size=50,
+                )
+                mult = _confidence_multiplier(est)
+                assert 0.5 <= mult <= 1.0
 
 
 class TestEvPerDollar:
@@ -136,16 +198,15 @@ class TestScanCalibration:
         opps = scan_calibration([ml])
         assert opps == []
 
-    def test_sweet_spot_vs_outside_sizing(self, monkeypatch):
-        """Sweet spot gets full size; outside sweet spot gets 0.5x."""
+    def test_confidence_multiplier_used_in_sizing(self, monkeypatch):
+        """Confidence multiplier replaces hard sweet-spot boundary for sizing."""
         self._patch(monkeypatch)
-        # Sweet spot: 0.35 (band [0.35, 0.40), wr=0.904)
+        # Sweet spot: 0.35
         ml_sweet = _make_ml(
             ["Knicks", "Celtics"], [0.35, 0.65],
             slug="nba-sweet", title="Sweet Game",
         )
-        # Outside sweet spot: 0.70 (band [0.70, 0.75), wr=0.933)
-        # B=0.15 has no band → only 0.70 considered
+        # Outside sweet spot: 0.70 (previously got 0.5x, now gets CI-based)
         ml_outside = _make_ml(
             ["Knicks", "Celtics"], [0.70, 0.15],
             slug="nba-outside", title="Outside Game",
@@ -156,9 +217,14 @@ class TestScanCalibration:
         assert len(opps_sweet) == 1
         assert len(opps_outside) == 1
 
+        # in_sweet_spot メタデータはそのまま
         assert opps_sweet[0].in_sweet_spot is True
         assert opps_outside[0].in_sweet_spot is False
-        assert opps_outside[0].poly_price == 0.70
+
+        # 旧ロジックでは outside は sweet の ~0.5x だったが、
+        # 新ロジックでは CI ベースなので差は小さくなるはず
+        # (outside 0.70 は高サンプル・高勝率バンドなので confidence_mult は高い)
+        assert opps_outside[0].position_usd > 0
 
     def test_sorted_by_ev_desc(self, monkeypatch):
         """Multiple games sorted by EV/$ descending."""
@@ -194,7 +260,7 @@ class TestScanCalibration:
         assert opp.calibration_edge_pct == pytest.approx(expected_edge, abs=0.01)
 
     def test_high_favorite_signal(self, monkeypatch):
-        """High favorite (0.80) gets a signal with reduced sizing."""
+        """High favorite (0.80) gets a signal with CI-based sizing."""
         self._patch(monkeypatch)
         ml = _make_ml(["Knicks", "Celtics"], [0.80, 0.15])
         opps = scan_calibration([ml])

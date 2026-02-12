@@ -98,6 +98,9 @@ class Settings(BaseSettings):
     llm_max_sizing_modifier: float = 1.5  # sizing_modifier 上限
     llm_min_sizing_modifier: float = 0.5  # sizing_modifier 下限
 
+    # === Calibration confidence (Phase Q) ===
+    calibration_confidence_level: float = 0.90  # Beta posterior lower percentile
+
     # === MERGE (Phase B2) ===
     merge_enabled: bool = True  # MERGE はデフォルト有効 (BOTHSIDE とは独立)
     merge_max_combined_vwap: float = 0.998  # これ以上なら MERGE しない

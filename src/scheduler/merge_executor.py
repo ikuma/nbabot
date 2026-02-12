@@ -112,10 +112,10 @@ def process_merge_eligible(
             gas_cost_usd = 0.0
             if execution_mode == "live":
                 try:
-                    from src.connectors.ctf import estimate_merge_gas
+                    from src.connectors.ctf import estimate_merge_gas, get_matic_usd_price
 
                     gas_matic = estimate_merge_gas(condition_id, merge_amount)
-                    gas_cost_usd = gas_matic * 0.40  # 概算
+                    gas_cost_usd = gas_matic * get_matic_usd_price()
                 except Exception:
                     logger.warning("Gas estimation failed for %s", bs_gid[:8])
                     gas_cost_usd = 0.01  # フォールバック

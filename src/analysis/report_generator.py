@@ -14,6 +14,7 @@ def generate_report(
     conditions: dict[str, dict],
     games: list[dict],
     trader_name: str = "Trader",
+    expectation_gaps: list | None = None,
 ) -> str:
     """Generate a full P&L report as Markdown."""
     out: list[str] = []
@@ -68,6 +69,35 @@ def generate_report(
     out.append(f"- **MERGED**: {len(merged):,} conditions")
     out.append(f"- **Total**: {len(conditions):,} conditions")
     out.append("")
+
+    # Decomposed Metrics (Phase M1)
+    total_settled = len(wins) + len(losses) + len(merged)
+    if total_settled > 0:
+        out.append("### Decomposed Metrics")
+        out.append("")
+        out.append("| Metric | Count | Rate |")
+        out.append("|--------|-------|------|")
+
+        # Game correct rate: WIN conditions picked the right side
+        game_correct = len(wins)
+        # Only WIN/LOSS have game outcome; MERGED are excluded
+        game_total = len(wins) + len(losses)
+        gcr = game_correct / game_total * 100 if game_total > 0 else 0
+        out.append(
+            f"| Game Correct | {game_correct}/{game_total} | {gcr:.1f}% |"
+        )
+
+        # Trade profit rate: P&L > 0
+        trade_profitable = sum(1 for c in conditions.values() if c["pnl"] > 0)
+        tpr = trade_profitable / total_settled * 100 if total_settled > 0 else 0
+        out.append(
+            f"| Trade Profitable | {trade_profitable}/{total_settled} | {tpr:.1f}% |"
+        )
+
+        # Merge rate: conditions settled via MERGE
+        mr = len(merged) / total_settled * 100 if total_settled > 0 else 0
+        out.append(f"| MERGE Settled | {len(merged)}/{total_settled} | {mr:.1f}% |")
+        out.append("")
 
     # WIN
     win_cost = sum(c["net_cost"] for c in wins)
@@ -227,6 +257,13 @@ def generate_report(
             f"${pnl:,.0f} | {roi:.1f}% | ${cumulative:,.0f} |"
         )
     out.append("")
+
+    # -- 4b. Expected vs Realized PnL (Phase S) --
+    if expectation_gaps:
+        from src.analysis.expectation_tracker import format_expectation_report
+
+        out.append("---")
+        out.extend(format_expectation_report(expectation_gaps))
 
     # -- 5. Price band P&L --
     out.append("---")

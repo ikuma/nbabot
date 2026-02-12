@@ -17,7 +17,7 @@ def preflight_check() -> bool:
     from datetime import date
 
     from src.connectors.polymarket import get_usdc_balance
-    from src.store.db import get_todays_exposure, get_todays_live_orders
+    from src.store.db import get_pending_dca_exposure, get_todays_exposure, get_todays_live_orders
 
     try:
         if not settings.polymarket_private_key:
@@ -44,10 +44,14 @@ def preflight_check() -> bool:
             return False
 
         exposure = get_todays_exposure(today_str)
-        if exposure >= settings.max_daily_exposure_usd:
+        pending_dca = get_pending_dca_exposure()
+        total_potential = exposure + pending_dca
+        if total_potential >= settings.max_daily_exposure_usd:
             logger.error(
-                "[preflight] Daily exposure limit: $%.0f/$%.0f",
+                "[preflight] Potential exposure limit: $%.0f ($%.0f placed + $%.0f pending DCA) / $%.0f",
+                total_potential,
                 exposure,
+                pending_dca,
                 settings.max_daily_exposure_usd,
             )
             return False

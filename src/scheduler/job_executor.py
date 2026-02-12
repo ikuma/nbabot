@@ -403,6 +403,14 @@ def process_single_job(
                 logger.exception("Job %d: order failed", job.id)
                 return JobResult(job.id, job.event_slug, "failed", signal_id, str(e)), None
 
+        # Fee 記録 (Phase M3 — 監査証跡)
+        try:
+            from src.store.db import update_signal_fee
+
+            update_signal_fee(signal_id, fee_rate_bps=0.0, fee_usd=0.0, db_path=db_path)
+        except Exception:
+            logger.debug("Fee recording failed for signal #%d", signal_id, exc_info=True)
+
         # 即時通知 (Phase N)
         try:
             from src.notifications.telegram import notify_trade

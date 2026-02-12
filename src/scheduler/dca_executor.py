@@ -268,6 +268,14 @@ def process_dca_active_jobs(
                 results.append(JobResult(job.id, job.event_slug, "failed", new_signal_id, str(e)))
                 continue
 
+        # Fee 記録 (Phase M3 — 監査証跡)
+        try:
+            from src.store.db import update_signal_fee
+
+            update_signal_fee(new_signal_id, fee_rate_bps=0.0, fee_usd=0.0, db_path=path)
+        except Exception:
+            logger.debug("Fee recording failed for signal #%d", new_signal_id, exc_info=True)
+
         # 即時通知 (Phase N)
         try:
             from src.notifications.telegram import notify_dca
