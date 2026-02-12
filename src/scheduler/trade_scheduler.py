@@ -145,29 +145,32 @@ def recover_executing_jobs(db_path: str | None = None) -> int:
 
     recovered = 0
     for job in stuck:
-        # bothside 区別: job_side に対応する signal_role でチェック
-        signal_role = "hedge" if job.job_side == "hedge" else "directional"
-        if has_signal_for_slug_and_side(job.event_slug, signal_role, db_path=path):
-            # 発注済み — executed に
-            update_job_status(job.id, "executed", db_path=path)
-            logger.info(
-                "Recovered job %d (%s/%s): executing → executed (signal found)",
-                job.id,
-                job.event_slug,
-                job.job_side,
-            )
-        else:
-            # 発注未完了 — pending に戻す
-            update_job_status(job.id, "pending", db_path=path)
-            logger.info(
-                "Recovered job %d (%s/%s): executing → pending (no signal)",
-                job.id,
-                job.event_slug,
-                job.job_side,
-            )
+        _recover_single_executing_job(job, path)
         recovered += 1
 
     return recovered
+
+
+def _recover_single_executing_job(job, db_path: str) -> None:
+    """Recover one executing job based on signal existence."""
+    signal_role = "hedge" if job.job_side == "hedge" else "directional"
+    if has_signal_for_slug_and_side(job.event_slug, signal_role, db_path=db_path):
+        update_job_status(job.id, "executed", db_path=db_path)
+        logger.info(
+            "Recovered job %d (%s/%s): executing → executed (signal found)",
+            job.id,
+            job.event_slug,
+            job.job_side,
+        )
+        return
+
+    update_job_status(job.id, "pending", db_path=db_path)
+    logger.info(
+        "Recovered job %d (%s/%s): executing → pending (no signal)",
+        job.id,
+        job.event_slug,
+        job.job_side,
+    )
 
 
 # ---------------------------------------------------------------------------
