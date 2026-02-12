@@ -11,6 +11,7 @@ from dataclasses import dataclass
 
 from src.config import settings
 from src.scheduler.preflight import preflight_check as _preflight_check  # noqa: F401
+from src.scheduler.pricing import below_market_price
 from src.store.db import (
     TradeJob,
     update_dca_job,
@@ -29,6 +30,140 @@ class JobResult:
     status: str  # executed, skipped, failed
     signal_id: int | None = None
     error: str | None = None
+
+
+def _build_liquidity_map(token_ids: list[str], event_slug: str):
+    """Build token_id -> liquidity snapshot map when liquidity checks are enabled."""
+    if not settings.check_liquidity or not token_ids:
+        return None
+    try:
+        from src.connectors.polymarket import fetch_order_books_batch
+        from src.sizing.liquidity import extract_liquidity
+
+        order_books = fetch_order_books_batch(token_ids)
+        if not order_books:
+            return None
+
+        liquidity_map = {}
+        for token_id, book in order_books.items():
+            snap = extract_liquidity(book, token_id)
+            if snap:
+                liquidity_map[token_id] = snap
+        return liquidity_map or None
+    except Exception:
+        logger.warning("Order book fetch failed for %s, proceeding without", event_slug)
+        return None
+
+
+def _fetch_live_balance(execution_mode: str, event_slug: str) -> float | None:
+    """Fetch USDC balance only for live execution mode."""
+    if execution_mode != "live":
+        return None
+    try:
+        from src.connectors.polymarket import get_usdc_balance
+
+        return get_usdc_balance()
+    except Exception:
+        logger.warning("Balance fetch failed for %s", event_slug)
+        return None
+
+
+def _resolve_home_away_outcomes(outcomes: list[str], home_short: str) -> tuple[str, str]:
+    """Resolve home/away outcome names from market outcomes."""
+    home_outcome = ""
+    away_outcome = ""
+    for outcome in outcomes:
+        if outcome == home_short:
+            home_outcome = outcome
+        else:
+            away_outcome = outcome
+    return home_outcome, away_outcome
+
+
+def _apply_llm_directional_override(
+    ml,
+    bothside_opp,
+    opp,
+    llm_analysis,
+    home_short: str,
+    liquidity_map,
+    balance_usd: float | None,
+    effective_hedge_mult: float,
+):
+    """Apply LLM-first directional override (Case A/B) and return updated opp/bothside."""
+    from src.strategy.calibration_scanner import (
+        BothsideOpportunity,
+        evaluate_single_outcome,
+    )
+    from src.strategy.llm_analyzer import determine_directional
+
+    home_outcome, away_outcome = _resolve_home_away_outcomes(ml.outcomes, home_short)
+    dir_name, _ = determine_directional(llm_analysis, home_outcome, away_outcome)
+
+    if opp.outcome_name == dir_name:
+        return opp, bothside_opp
+
+    # Case A: hedge 存在 → swap
+    if bothside_opp.hedge and bothside_opp.hedge.outcome_name == dir_name:
+        logger.info(
+            "LLM override (swap): %s -> %s (LLM favored=%s)",
+            opp.outcome_name,
+            dir_name,
+            llm_analysis.favored_team,
+        )
+        opp = bothside_opp.hedge
+        bothside_opp = BothsideOpportunity(
+            directional=opp,
+            hedge=bothside_opp.directional,
+            combined_price=bothside_opp.combined_price,
+            hedge_position_usd=bothside_opp.hedge_position_usd,
+        )
+        return opp, bothside_opp
+
+    # Case B: hedge=None → LLM 側を独立評価
+    llm_price = None
+    llm_token_id = None
+    for i, outcome in enumerate(ml.outcomes):
+        if outcome == dir_name and i < len(ml.prices):
+            llm_price = ml.prices[i]
+            llm_token_id = ml.token_ids[i] if i < len(ml.token_ids) else None
+            break
+
+    if llm_price and llm_token_id:
+        liquidity = liquidity_map.get(llm_token_id) if liquidity_map else None
+        llm_opp = evaluate_single_outcome(
+            price=llm_price,
+            outcome_name=dir_name,
+            token_id=llm_token_id,
+            event_slug=ml.event_slug,
+            event_title=ml.event_title,
+            balance_usd=balance_usd,
+            liquidity=liquidity,
+        )
+        if llm_opp:
+            logger.info(
+                "LLM override (Case B): %s -> %s @ %.3f ev=%.3f",
+                opp.outcome_name,
+                dir_name,
+                llm_price,
+                llm_opp.ev_per_dollar,
+            )
+            old_dir = opp
+            opp = llm_opp
+            bothside_opp = BothsideOpportunity(
+                directional=opp,
+                hedge=old_dir,
+                combined_price=opp.poly_price + old_dir.poly_price,
+                hedge_position_usd=old_dir.position_usd * effective_hedge_mult,
+            )
+        else:
+            logger.info(
+                "LLM Case B: %s @ %.3f no EV band, keeping %s",
+                dir_name,
+                llm_price,
+                opp.outcome_name,
+            )
+    return opp, bothside_opp
 
 
 def process_single_job(
@@ -68,40 +203,14 @@ def process_single_job(
             return JobResult(job.id, job.event_slug, "skipped"), None
 
         # 注文板取得 + 流動性抽出 (check_liquidity=True の場合)
-        from src.connectors.polymarket import (
-            fetch_order_books_batch as _fetch_obs,
-        )
-        from src.sizing.liquidity import LiquiditySnapshot
-        from src.sizing.liquidity import extract_liquidity as _extract
-
-        liquidity_map: dict[str, LiquiditySnapshot] | None = None
-        balance_usd: float | None = None
-
-        if settings.check_liquidity and ml.token_ids:
-            try:
-                order_books = _fetch_obs(ml.token_ids)
-                if order_books:
-                    liquidity_map = {}
-                    for tid, book in order_books.items():
-                        snap = _extract(book, tid)
-                        if snap:
-                            liquidity_map[tid] = snap
-                    if not liquidity_map:
-                        liquidity_map = None
-            except Exception:
-                logger.warning("Order book fetch failed for %s, proceeding without", job.event_slug)
+        liquidity_map = _build_liquidity_map(ml.token_ids, job.event_slug)
 
         # 残高取得 (live モードのみ)
-        if execution_mode == "live":
-            try:
-                from src.connectors.polymarket import get_usdc_balance
-
-                balance_usd = get_usdc_balance()
-            except Exception:
-                logger.warning("Balance fetch failed for %s", job.event_slug)
+        balance_usd = _fetch_live_balance(execution_mode, job.event_slug)
 
         # --- LLM 分析 (Phase L): 校正スキャンの前に実行 ---
         llm_analysis = None
+        home_short = ""
         effective_sizing = sizing_multiplier
         effective_hedge_mult = settings.bothside_hedge_kelly_mult
 
@@ -171,90 +280,16 @@ def process_single_job(
 
             # --- LLM-First: directional を LLM が決定 ---
             if llm_analysis and bothside_opp and opp:
-                from src.strategy.calibration_scanner import (
-                    BothsideOpportunity,
-                    evaluate_single_outcome,
+                opp, bothside_opp = _apply_llm_directional_override(
+                    ml=ml,
+                    bothside_opp=bothside_opp,
+                    opp=opp,
+                    llm_analysis=llm_analysis,
+                    home_short=home_short,
+                    liquidity_map=liquidity_map,
+                    balance_usd=balance_usd,
+                    effective_hedge_mult=effective_hedge_mult,
                 )
-                from src.strategy.llm_analyzer import determine_directional
-
-                # LLM の favored_team と校正スキャナーの directional を比較
-                # home_short は上の LLM ブロックで算出済み
-                _home_outcome = ""
-                _away_outcome = ""
-                for _oc in ml.outcomes:
-                    if _oc == home_short:
-                        _home_outcome = _oc
-                    else:
-                        _away_outcome = _oc
-
-                dir_name, hedge_name = determine_directional(
-                    llm_analysis,
-                    _home_outcome,
-                    _away_outcome,
-                )
-                # LLM が校正スキャナーと違う側を推奨した場合
-                if opp.outcome_name != dir_name:
-                    if (
-                        bothside_opp.hedge
-                        and bothside_opp.hedge.outcome_name == dir_name
-                    ):
-                        # Case A: hedge 存在 → swap
-                        logger.info(
-                            "LLM override (swap): %s -> %s (LLM favored=%s)",
-                            opp.outcome_name,
-                            dir_name,
-                            llm_analysis.favored_team,
-                        )
-                        opp = bothside_opp.hedge
-                        bothside_opp = BothsideOpportunity(
-                            directional=opp,
-                            hedge=bothside_opp.directional,
-                            combined_price=bothside_opp.combined_price,
-                            hedge_position_usd=bothside_opp.hedge_position_usd,
-                        )
-                    else:
-                        # Case B: hedge=None → LLM 側を独立評価
-                        _llm_price = None
-                        _llm_token_id = None
-                        for _i, _oc in enumerate(ml.outcomes):
-                            if _oc == dir_name and _i < len(ml.prices):
-                                _llm_price = ml.prices[_i]
-                                _llm_token_id = ml.token_ids[_i] if _i < len(ml.token_ids) else None
-                                break
-                        if _llm_price and _llm_token_id:
-                            _liq = liquidity_map.get(_llm_token_id) if liquidity_map else None
-                            _llm_opp = evaluate_single_outcome(
-                                price=_llm_price,
-                                outcome_name=dir_name,
-                                token_id=_llm_token_id,
-                                event_slug=ml.event_slug,
-                                event_title=ml.event_title,
-                                balance_usd=balance_usd,
-                                liquidity=_liq,
-                            )
-                            if _llm_opp:
-                                logger.info(
-                                    "LLM override (Case B): %s -> %s @ %.3f ev=%.3f",
-                                    opp.outcome_name,
-                                    dir_name,
-                                    _llm_price,
-                                    _llm_opp.ev_per_dollar,
-                                )
-                                old_dir = opp
-                                opp = _llm_opp
-                                bothside_opp = BothsideOpportunity(
-                                    directional=opp,
-                                    hedge=old_dir,
-                                    combined_price=opp.poly_price + old_dir.poly_price,
-                                    hedge_position_usd=old_dir.position_usd * effective_hedge_mult,
-                                )
-                            else:
-                                logger.info(
-                                    "LLM Case B: %s @ %.3f no EV band, keeping %s",
-                                    dir_name,
-                                    _llm_price or 0,
-                                    opp.outcome_name,
-                                )
         else:
             opps = scan_calibration([ml], balance_usd=balance_usd, liquidity_map=liquidity_map)
             opp = opps[0] if opps else None
@@ -375,7 +410,7 @@ def process_single_job(
             size_usd = budget.slice_size_usd
             order_price = opp.poly_price
             if _liq_snap and _liq_snap.best_ask > 0:
-                order_price = max(_liq_snap.best_ask - 0.01, 0.01)  # below-market maker order
+                order_price = below_market_price(_liq_snap.best_ask)  # below-market maker order
             try:
                 resp = place_limit_buy(opp.token_id, order_price, size_usd)
                 order_id = resp.get("orderID") or resp.get("id", "")
@@ -397,7 +432,9 @@ def process_single_job(
                     event_type="placed",
                     order_id=order_id,
                     price=order_price,
-                    best_ask_at_event=_liq_snap.best_ask if _liq_snap and _liq_snap.best_ask > 0 else None,
+                    best_ask_at_event=(
+                        _liq_snap.best_ask if _liq_snap and _liq_snap.best_ask > 0 else None
+                    ),
                     db_path=db_path,
                 )
                 logger.info(

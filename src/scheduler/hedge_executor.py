@@ -13,6 +13,7 @@ from datetime import datetime, timedelta, timezone
 from src.config import settings
 from src.scheduler.job_executor import JobResult
 from src.scheduler.preflight import preflight_check as _preflight_check
+from src.scheduler.pricing import apply_price_ceiling, below_market_price
 from src.store.db import (
     TradeJob,
     get_dca_group_signals,
@@ -90,6 +91,63 @@ def _get_directional_dca_group(directional_job_id: int, db_path: str) -> str:
         conn.close()
 
 
+def _select_hedge_market(ml, dir_team: str | None):
+    """Pick directional and hedge outcomes from market outcomes."""
+    dir_price = None
+    hedge_price = None
+    hedge_outcome = None
+    hedge_token_id = None
+
+    for i, outcome in enumerate(ml.outcomes):
+        if i >= len(ml.prices):
+            continue
+        if outcome == dir_team:
+            dir_price = ml.prices[i]
+        else:
+            hedge_price = ml.prices[i]
+            hedge_outcome = outcome
+            hedge_token_id = ml.token_ids[i] if i < len(ml.token_ids) else None
+    return dir_price, hedge_price, hedge_outcome, hedge_token_id
+
+
+def _compute_directional_vwap(dir_signals: list, dir_price: float | None) -> float:
+    """Compute directional VWAP from DCA signals, fallback to current directional price."""
+    if not dir_signals:
+        return dir_price or 0.0
+
+    from src.strategy.dca_strategy import calculate_vwap_from_pairs
+
+    return calculate_vwap_from_pairs(
+        [s.kelly_size for s in dir_signals],
+        [s.fill_price or s.poly_price for s in dir_signals],
+    )
+
+
+def _compute_hedge_order_price(
+    hedge_token_id: str,
+    hedge_price: float,
+    max_hedge_price: float,
+    event_slug: str,
+) -> tuple[float, float]:
+    """Fetch best ask and compute constrained hedge order price."""
+    from src.connectors.polymarket import fetch_order_books_batch as _fetch_obs
+    from src.sizing.liquidity import extract_liquidity as _extract
+
+    best_ask = hedge_price  # fallback
+    try:
+        obs = _fetch_obs([hedge_token_id])
+        if obs and hedge_token_id in obs:
+            snap = _extract(obs[hedge_token_id], hedge_token_id)
+            if snap and snap.best_ask > 0:
+                best_ask = snap.best_ask
+    except Exception:
+        logger.warning("Order book fetch failed for hedge %s", event_slug)
+
+    order_price = below_market_price(best_ask)
+    order_price = apply_price_ceiling(order_price, max_hedge_price)
+    return best_ask, order_price
+
+
 def process_hedge_job(
     job: TradeJob,
     execution_mode: str,
@@ -126,20 +184,9 @@ def process_hedge_job(
 
         # directional のアウトカムを特定 (シグナルのチーム名で)
         dir_team = dir_signals[0].team if dir_signals else None
-        dir_price = None
-        hedge_price = None
-        hedge_outcome = None
-        hedge_token_id = None
-
-        for i, outcome in enumerate(ml.outcomes):
-            if i >= len(ml.prices):
-                continue
-            if outcome == dir_team:
-                dir_price = ml.prices[i]
-            else:
-                hedge_price = ml.prices[i]
-                hedge_outcome = outcome
-                hedge_token_id = ml.token_ids[i] if i < len(ml.token_ids) else None
+        dir_price, hedge_price, hedge_outcome, hedge_token_id = _select_hedge_market(
+            ml, dir_team
+        )
 
         if hedge_price is None or hedge_outcome is None or hedge_token_id is None:
             update_job_status(
@@ -148,14 +195,7 @@ def process_hedge_job(
             return JobResult(job.id, job.event_slug, "skipped")
 
         # Directional VWAP 算出
-        dir_vwap = dir_price or 0.0
-        if dir_signals:
-            from src.strategy.dca_strategy import calculate_vwap_from_pairs
-
-            dir_vwap = calculate_vwap_from_pairs(
-                [s.kelly_size for s in dir_signals],
-                [s.fill_price or s.poly_price for s in dir_signals],
-            )
+        dir_vwap = _compute_directional_vwap(dir_signals, dir_price)
 
         # Target-based max hedge price (target_combined に一本化)
         max_hedge_price = settings.bothside_target_combined - dir_vwap
@@ -176,21 +216,12 @@ def process_hedge_job(
             return JobResult(job.id, job.event_slug, "skipped")
 
         # 注文板取得 → below-market pricing
-        from src.connectors.polymarket import fetch_order_books_batch as _fetch_obs
-        from src.sizing.liquidity import extract_liquidity as _extract
-
-        best_ask = hedge_price  # fallback
-        try:
-            obs = _fetch_obs([hedge_token_id])
-            if obs and hedge_token_id in obs:
-                snap = _extract(obs[hedge_token_id], hedge_token_id)
-                if snap and snap.best_ask > 0:
-                    best_ask = snap.best_ask
-        except Exception:
-            logger.warning("Order book fetch failed for hedge %s", job.event_slug)
-
-        order_price = max(best_ask - 0.01, 0.01)  # below-market maker order
-        order_price = min(order_price, max_hedge_price)  # target 上限制限
+        best_ask, order_price = _compute_hedge_order_price(
+            hedge_token_id=hedge_token_id,
+            hedge_price=hedge_price,
+            max_hedge_price=max_hedge_price,
+            event_slug=job.event_slug,
+        )
 
         # Combined VWAP 最終チェック (MERGE 上限)
         combined = dir_vwap + order_price

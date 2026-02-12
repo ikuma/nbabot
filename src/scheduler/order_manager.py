@@ -8,10 +8,10 @@ from __future__ import annotations
 import logging
 import time
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
-from pathlib import Path
+from datetime import datetime, timezone
 
 from src.config import settings
+from src.scheduler.pricing import below_market_price
 from src.store.db import (
     DEFAULT_DB_PATH,
     SignalRecord,
@@ -281,7 +281,7 @@ def check_single_order(
         except Exception:
             pass
 
-    new_price = max(best_ask - 0.01, 0.01)
+    new_price = below_market_price(best_ask)
 
     # 価格移動が小さい → keep
     if abs(new_price - current_order_price) < settings.order_min_price_move:
@@ -370,7 +370,7 @@ def check_single_order(
             best_ask=best_ask,
         )
 
-    except Exception as e:
+    except Exception:
         logger.exception("Re-place failed for signal #%d (order %s)", signal.id, order_id)
         return OrderCheckResult(signal.id, "error", old_order_id=order_id)
 

@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 
 from src.config import settings
 from src.scheduler.job_executor import JobResult
+from src.scheduler.pricing import apply_price_ceiling, below_market_price
 from src.store.db import (
     DEFAULT_DB_PATH,
     get_dca_active_jobs,
@@ -272,7 +273,7 @@ def process_dca_active_jobs(
                     if _obs and target_token_id in _obs:
                         _snap = _extract_dca(_obs[target_token_id], target_token_id)
                         if _snap and _snap.best_ask > 0:
-                            dca_order_price = max(_snap.best_ask - 0.01, 0.01)
+                            dca_order_price = below_market_price(_snap.best_ask)
                 except Exception:
                     logger.warning("DCA order book fetch failed for job %d", job.id)
 
@@ -281,8 +282,7 @@ def process_dca_active_jobs(
                     _dir_vwap2 = _get_directional_vwap(job.paired_job_id, path)
                     if _dir_vwap2 > 0:
                         _max_h = settings.bothside_target_combined - _dir_vwap2
-                        dca_order_price = min(dca_order_price, _max_h)
-                        dca_order_price = max(dca_order_price, 0.01)
+                        dca_order_price = apply_price_ceiling(dca_order_price, _max_h)
 
                 resp = place_limit_buy(target_token_id, dca_order_price, dca_size)
                 order_id = resp.get("orderID") or resp.get("id", "")
