@@ -420,6 +420,16 @@ Gamma Events API ──→ MoneylineMarket[] ──────────┤
 - API 呼び出しはモック化。実 API テストは環境変数で明示的に有効化。
 - ロジック変更時は `pytest` を実行してからコミット。
 
+## コミット前チェック (必須)
+
+コミット前に以下を **必ず** 実行し、全パスを確認すること。失敗時はコミットせず修正する。
+
+1. **テスト**: `python -m pytest -q --tb=short` — 既知の 5 件 (`test_llm_analyzer.py` 内 asyncio 系) を超える失敗は回帰バグ。修正必須。
+2. **リント**: `ruff check <変更したファイル>` — 自分が変更したファイルに新たな violation を残さない。
+3. **フォーマット**: `ruff format <変更したファイル>` — 変更ファイルのフォーマットを整える。
+
+pre-commit hook (`.git/hooks/pre-commit`) で pytest 回帰チェックが自動実行される。hook が BLOCKED を返したらコミットできない。
+
 ## コミット規約
 
 - Conventional Commits 形式: `type: message` (例: `feat: add team mapping`, `fix: correct slug date timezone`)
