@@ -263,6 +263,23 @@ def process_eligible_jobs(
     return results
 
 
+def _partition_tick_results(
+    results: list[JobResult],
+    dca_results: list[JobResult],
+    merge_results: list[JobResult],
+) -> dict[str, list[JobResult]]:
+    """Group tick results by source and status for summary formatting."""
+    return {
+        "executed": [r for r in results if r.status == "executed"],
+        "skipped": [r for r in results if r.status == "skipped"],
+        "failed": [r for r in results if r.status == "failed"],
+        "dca_executed": [r for r in dca_results if r.status == "executed"],
+        "dca_failed": [r for r in dca_results if r.status == "failed"],
+        "merge_executed": [r for r in merge_results if r.status == "executed"],
+        "merge_failed": [r for r in merge_results if r.status == "failed"],
+    }
+
+
 # ---------------------------------------------------------------------------
 # 4. format_tick_summary — Telegram 通知用
 # ---------------------------------------------------------------------------
@@ -293,13 +310,14 @@ def format_tick_summary(
     path = db_path or DEFAULT_DB_PATH
     summary = get_job_summary(game_date, db_path=path)
 
-    executed = [r for r in results if r.status == "executed"]
-    skipped = [r for r in results if r.status == "skipped"]
-    failed = [r for r in results if r.status == "failed"]
-    dca_executed = [r for r in dca_results if r.status == "executed"]
-    dca_failed = [r for r in dca_results if r.status == "failed"]
-    merge_executed = [r for r in merge_results if r.status == "executed"]
-    merge_failed = [r for r in merge_results if r.status == "failed"]
+    grouped = _partition_tick_results(results, dca_results, merge_results)
+    executed = grouped["executed"]
+    skipped = grouped["skipped"]
+    failed = grouped["failed"]
+    dca_executed = grouped["dca_executed"]
+    dca_failed = grouped["dca_failed"]
+    merge_executed = grouped["merge_executed"]
+    merge_failed = grouped["merge_failed"]
 
     lines = [f"*Tick* ({game_date})"]
     if games_found > 0:
