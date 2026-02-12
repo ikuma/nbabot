@@ -41,6 +41,19 @@ def _update_per_signal_merge_data(
             update_fn(sig.id, sig_merged, sig_recovery, db_path=db_path)
 
 
+def _update_merge_job_pair(
+    dir_job_id: int,
+    hedge_job_id: int,
+    status: str,
+    merge_id: int,
+    db_path: str,
+    update_fn,
+) -> None:
+    """Apply the same merge status update to directional and hedge jobs."""
+    update_fn(dir_job_id, status, merge_id, db_path=db_path)
+    update_fn(hedge_job_id, status, merge_id, db_path=db_path)
+
+
 def process_merge_eligible(
     execution_mode: str = "paper",
     db_path: str | None = None,
@@ -187,8 +200,14 @@ def process_merge_eligible(
                         merge_amount, combined_vwap, path,
                         update_signal_merge_data,
                     )
-                    update_job_merge_status(dir_job_id, "executed", merge_id, db_path=path)
-                    update_job_merge_status(hedge_job_id, "executed", merge_id, db_path=path)
+                    _update_merge_job_pair(
+                        dir_job_id,
+                        hedge_job_id,
+                        "executed",
+                        merge_id,
+                        path,
+                        update_job_merge_status,
+                    )
                     logger.info(
                         "MERGE executed %s: %.2f shares, profit=$%.4f, tx=%s",
                         bs_gid[:8],
@@ -203,8 +222,14 @@ def process_merge_eligible(
                         error_message=merge_result.error,
                         db_path=path,
                     )
-                    update_job_merge_status(dir_job_id, "failed", merge_id, db_path=path)
-                    update_job_merge_status(hedge_job_id, "failed", merge_id, db_path=path)
+                    _update_merge_job_pair(
+                        dir_job_id,
+                        hedge_job_id,
+                        "failed",
+                        merge_id,
+                        path,
+                        update_job_merge_status,
+                    )
                     logger.warning(
                         "MERGE failed %s: %s",
                         bs_gid[:8],
@@ -232,8 +257,14 @@ def process_merge_eligible(
                     merge_amount, combined_vwap, path,
                     update_signal_merge_data,
                 )
-                update_job_merge_status(dir_job_id, "executed", merge_id, db_path=path)
-                update_job_merge_status(hedge_job_id, "executed", merge_id, db_path=path)
+                _update_merge_job_pair(
+                    dir_job_id,
+                    hedge_job_id,
+                    "executed",
+                    merge_id,
+                    path,
+                    update_job_merge_status,
+                )
                 logger.info(
                     "[%s] MERGE simulated %s: %.2f shares, cvwap=%.4f, profit=$%.4f",
                     execution_mode,
