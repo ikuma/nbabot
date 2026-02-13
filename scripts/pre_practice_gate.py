@@ -193,6 +193,23 @@ def main() -> int:
         action="store_true",
         help="Require authenticated Polymarket balance check",
     )
+    parser.add_argument(
+        "--check-position-group-risk",
+        action="store_true",
+        help="Run PositionGroup DMax violation guard check",
+    )
+    parser.add_argument(
+        "--max-violation-rate",
+        type=float,
+        default=1.0,
+        help="Allowed DMax violation rate percent",
+    )
+    parser.add_argument(
+        "--max-violation-ratio",
+        type=float,
+        default=1.2,
+        help="Allowed max |d|/DMax ratio",
+    )
     args = parser.parse_args()
 
     required_failures = 0
@@ -231,6 +248,24 @@ def main() -> int:
         test_cmd = [PYTHON, "-m", "pytest", "-q", *FOCUSED_TESTS]
         test_res = _run_cmd("focused pytest", test_cmd, required=True)
         req, opt = _print_results([test_res])
+        required_failures += req
+        optional_failures += opt
+
+    if args.check_position_group_risk:
+        _print_section("PositionGroup Risk Guard")
+        risk_cmd = [
+            PYTHON,
+            "scripts/report_position_groups.py",
+            "--db",
+            str(PROJECT_ROOT / "data" / "paper_trades.db"),
+            "--max-violation-rate",
+            str(args.max_violation_rate),
+            "--max-violation-ratio",
+            str(args.max_violation_ratio),
+            "--fail-on-breach",
+        ]
+        risk_res = _run_cmd("position-group risk", risk_cmd, required=True)
+        req, opt = _print_results([risk_res])
         required_failures += req
         optional_failures += opt
 

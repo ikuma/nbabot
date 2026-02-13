@@ -9,6 +9,9 @@ Input JSON format (list of objects):
     "directional_won": true
   }
 ]
+
+Or DB source:
+  ./.venv/bin/python scripts/run_position_group_backtest.py --db data/paper_trades.db
 """
 
 from __future__ import annotations
@@ -25,11 +28,20 @@ from src.analysis.position_group_backtest import (  # noqa: E402
     PositionGroupGameInput,
     compare_position_group_strategies,
 )
+from src.store.db import DEFAULT_DB_PATH, get_position_group_backtest_games  # noqa: E402
 
 
 def _build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="Compare MERGE-only / Directional-only / Composite")
-    p.add_argument("--input", required=True, help="Path to JSON dataset")
+    p.add_argument("--input", default="", help="Path to JSON dataset")
+    p.add_argument("--db", default=str(DEFAULT_DB_PATH), help="SQLite DB path")
+    p.add_argument("--start-at", default="", help="ISO8601 start (inclusive)")
+    p.add_argument("--end-at", default="", help="ISO8601 end (exclusive)")
+    p.add_argument(
+        "--fill-opposite-from-complement",
+        action="store_true",
+        help="Use 1-directional_price when opposite_price is missing",
+    )
     p.add_argument("--merge-shares", type=float, default=100.0, help="M shares per game")
     p.add_argument("--directional-shares", type=float, default=30.0, help="D shares per game")
     p.add_argument("--fee-per-share", type=float, default=0.0, help="Fee per share (USD)")
@@ -59,9 +71,53 @@ def _load_inputs(path: str) -> list[PositionGroupGameInput]:
     return games
 
 
+def _load_inputs_from_db(
+    *,
+    db_path: str,
+    start_at: str | None,
+    end_at: str | None,
+    fill_opposite_from_complement: bool,
+) -> tuple[list[PositionGroupGameInput], int]:
+    rows = get_position_group_backtest_games(
+        db_path=db_path,
+        start_at=start_at,
+        end_at=end_at,
+    )
+    games: list[PositionGroupGameInput] = []
+    skipped_missing_opp = 0
+    for row in rows:
+        opp = row["opposite_price"]
+        if opp is None and fill_opposite_from_complement:
+            opp = 1.0 - float(row["directional_price"])
+        if opp is None:
+            skipped_missing_opp += 1
+            continue
+        games.append(
+            PositionGroupGameInput(
+                event_slug=str(row["event_slug"]),
+                directional_price=float(row["directional_price"]),
+                opposite_price=float(opp),
+                directional_won=bool(row["directional_won"]),
+            )
+        )
+    return games, skipped_missing_opp
+
+
 def main() -> int:
     args = _build_parser().parse_args()
-    games = _load_inputs(args.input)
+    if args.input:
+        games = _load_inputs(args.input)
+        skipped_missing_opp = 0
+    else:
+        games, skipped_missing_opp = _load_inputs_from_db(
+            db_path=args.db,
+            start_at=args.start_at or None,
+            end_at=args.end_at or None,
+            fill_opposite_from_complement=args.fill_opposite_from_complement,
+        )
+    if not games:
+        print("No backtest games found")
+        return 1
     out = compare_position_group_strategies(
         games,
         merge_shares=args.merge_shares,
@@ -72,6 +128,9 @@ def main() -> int:
 
     print("=== PositionGroup Strategy Comparison ===")
     print(f"games={out.composite.games}")
+    if not args.input:
+        print(f"source=db:{args.db}")
+        print(f"skipped_missing_opposite={skipped_missing_opp}")
     print(
         f"merge_only: total={out.merge_only.total_pnl:.2f}, avg={out.merge_only.avg_pnl:.4f}, "
         f"win_rate={out.merge_only.win_rate*100:.1f}%"

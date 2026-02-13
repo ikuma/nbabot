@@ -1111,6 +1111,77 @@ def get_position_group_risk_inputs(
         conn.close()
 
 
+def get_position_group_backtest_games(
+    *,
+    db_path: Path | str = DEFAULT_DB_PATH,
+    start_at: str | None = None,
+    end_at: str | None = None,
+) -> list[dict]:
+    """Build per-game inputs for position-group strategy comparison.
+
+    Returns rows with:
+      - event_slug
+      - directional_price
+      - opposite_price (latest hedge price up to settlement, nullable)
+      - directional_won
+      - settled_at
+    """
+    conn = _connect(db_path)
+    try:
+        where_parts = [
+            "s.signal_role = 'directional'",
+            "COALESCE(s.fill_price, s.poly_price) > 0",
+        ]
+        params: list[object] = []
+        if start_at:
+            where_parts.append("r.settled_at >= ?")
+            params.append(start_at)
+        if end_at:
+            where_parts.append("r.settled_at < ?")
+            params.append(end_at)
+        where_sql = " AND ".join(where_parts)
+        rows = conn.execute(
+            f"""SELECT
+                    s.event_slug AS event_slug,
+                    COALESCE(s.fill_price, s.poly_price) AS directional_price,
+                    (
+                        SELECT COALESCE(h.fill_price, h.poly_price)
+                          FROM signals h
+                         WHERE h.event_slug = s.event_slug
+                           AND h.signal_role = 'hedge'
+                           AND COALESCE(h.fill_price, h.poly_price) > 0
+                           AND h.created_at <= r.settled_at
+                         ORDER BY h.created_at DESC, h.id DESC
+                         LIMIT 1
+                    ) AS opposite_price,
+                    r.won AS directional_won,
+                    r.settled_at AS settled_at
+                 FROM signals s
+                 JOIN results r ON r.signal_id = s.id
+                WHERE {where_sql}
+                ORDER BY r.settled_at ASC, s.id ASC""",
+            tuple(params),
+        ).fetchall()
+        out: list[dict] = []
+        for r in rows:
+            out.append(
+                {
+                    "event_slug": str(r["event_slug"]),
+                    "directional_price": float(r["directional_price"]),
+                    "opposite_price": (
+                        float(r["opposite_price"])
+                        if r["opposite_price"] is not None
+                        else None
+                    ),
+                    "directional_won": bool(r["directional_won"]),
+                    "settled_at": str(r["settled_at"]),
+                }
+            )
+        return out
+    finally:
+        conn.close()
+
+
 # ---------------------------------------------------------------------------
 # DCA helpers
 # ---------------------------------------------------------------------------
