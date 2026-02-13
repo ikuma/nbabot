@@ -13,4 +13,5 @@ data/logs/
 .ruff_cache/
 .pytest_cache/
 data/heartbeat
+data/heartbeat_ordermgr
 data/.watchdog_alerted

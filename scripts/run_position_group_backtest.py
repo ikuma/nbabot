@@ -12,6 +12,7 @@ Input JSON format (list of objects):
 
 Or DB source:
   ./.venv/bin/python scripts/run_position_group_backtest.py --db data/paper_trades.db
+  ./.venv/bin/python scripts/run_position_group_backtest.py --execution live
 """
 
 from __future__ import annotations
@@ -28,13 +29,20 @@ from src.analysis.position_group_backtest import (  # noqa: E402
     PositionGroupGameInput,
     compare_position_group_strategies,
 )
-from src.store.db import DEFAULT_DB_PATH, get_position_group_backtest_games  # noqa: E402
+from src.store.db import get_position_group_backtest_games  # noqa: E402
+from src.store.db_path import resolve_db_path  # noqa: E402
 
 
 def _build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="Compare MERGE-only / Directional-only / Composite")
     p.add_argument("--input", default="", help="Path to JSON dataset")
-    p.add_argument("--db", default=str(DEFAULT_DB_PATH), help="SQLite DB path")
+    p.add_argument("--db", default="", help="SQLite DB path (optional override)")
+    p.add_argument(
+        "--execution",
+        choices=["paper", "live", "dry-run"],
+        default="paper",
+        help="DB mode when --db is omitted",
+    )
     p.add_argument("--start-at", default="", help="ISO8601 start (inclusive)")
     p.add_argument("--end-at", default="", help="ISO8601 end (exclusive)")
     p.add_argument(
@@ -105,12 +113,17 @@ def _load_inputs_from_db(
 
 def main() -> int:
     args = _build_parser().parse_args()
+    resolved_db = ""
     if args.input:
         games = _load_inputs(args.input)
         skipped_missing_opp = 0
     else:
+        resolved_db = resolve_db_path(
+            execution_mode=args.execution,
+            explicit_db_path=args.db or None,
+        )
         games, skipped_missing_opp = _load_inputs_from_db(
-            db_path=args.db,
+            db_path=resolved_db,
             start_at=args.start_at or None,
             end_at=args.end_at or None,
             fill_opposite_from_complement=args.fill_opposite_from_complement,
@@ -129,7 +142,7 @@ def main() -> int:
     print("=== PositionGroup Strategy Comparison ===")
     print(f"games={out.composite.games}")
     if not args.input:
-        print(f"source=db:{args.db}")
+        print(f"source=db:{resolved_db}")
         print(f"skipped_missing_opposite={skipped_missing_opp}")
     print(
         f"merge_only: total={out.merge_only.total_pnl:.2f}, avg={out.merge_only.avg_pnl:.4f}, "

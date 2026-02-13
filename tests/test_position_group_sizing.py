@@ -42,7 +42,8 @@ def test_merge_target_zero_when_edge_not_positive():
     assert t.q_opp_target == 0.0
 
 
-def test_low_confidence_reduces_directional_target():
+def test_low_confidence_reduces_directional_target(monkeypatch):
+    monkeypatch.setattr("src.strategy.position_group_sizing.settings.max_position_usd", 1000.0)
     common = dict(
         directional_price=0.40,
         opposite_price=0.55,

@@ -19,15 +19,21 @@ from src.analysis.metrics import (  # noqa: E402
     format_position_group_risk_summary,
 )
 from src.store.db import (  # noqa: E402
-    DEFAULT_DB_PATH,
     get_position_group_audit_events,
     get_position_group_risk_inputs,
 )
+from src.store.db_path import resolve_db_path  # noqa: E402
 
 
 def _build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="Report PositionGroup audit/risk metrics")
-    p.add_argument("--db", default=str(DEFAULT_DB_PATH), help="SQLite DB path")
+    p.add_argument("--db", default="", help="SQLite DB path (optional override)")
+    p.add_argument(
+        "--execution",
+        choices=["paper", "live", "dry-run"],
+        default="paper",
+        help="DB mode when --db is omitted",
+    )
     p.add_argument("--event-slug", default="", help="Filter by one event slug")
     p.add_argument("--start-at", default="", help="ISO8601 start (inclusive)")
     p.add_argument("--end-at", default="", help="ISO8601 end (exclusive)")
@@ -43,8 +49,12 @@ def _build_parser() -> argparse.ArgumentParser:
 
 def main() -> int:
     args = _build_parser().parse_args()
+    db_path = resolve_db_path(
+        execution_mode=args.execution,
+        explicit_db_path=args.db or None,
+    )
     rows = get_position_group_risk_inputs(
-        db_path=args.db,
+        db_path=db_path,
         event_slug=args.event_slug or None,
         start_at=args.start_at or None,
         end_at=args.end_at or None,
@@ -57,7 +67,7 @@ def main() -> int:
     print(format_position_group_risk_summary(metrics))
 
     if args.event_slug:
-        recent = get_position_group_audit_events(args.event_slug, limit=10, db_path=args.db)
+        recent = get_position_group_audit_events(args.event_slug, limit=10, db_path=db_path)
         if recent:
             print("\nRecent audit events:")
             for ev in recent[-10:]:

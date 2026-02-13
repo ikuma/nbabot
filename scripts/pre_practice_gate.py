@@ -166,6 +166,8 @@ def _print_results(results: list[StepResult]) -> tuple[int, int]:
 
 
 def main() -> int:
+    from src.store.db_path import resolve_db_path
+
     parser = argparse.ArgumentParser(description="One-command pre-practice gate")
     parser.add_argument("--date", help="Scheduler test date YYYY-MM-DD")
     parser.add_argument(
@@ -210,6 +212,17 @@ def main() -> int:
         default=1.2,
         help="Allowed max |d|/DMax ratio",
     )
+    parser.add_argument(
+        "--risk-db-mode",
+        choices=["paper", "live", "dry-run"],
+        default="paper",
+        help="DB mode used by PositionGroup risk guard",
+    )
+    parser.add_argument(
+        "--risk-db",
+        default="",
+        help="Explicit DB path for PositionGroup risk guard",
+    )
     args = parser.parse_args()
 
     required_failures = 0
@@ -253,11 +266,15 @@ def main() -> int:
 
     if args.check_position_group_risk:
         _print_section("PositionGroup Risk Guard")
+        risk_db = resolve_db_path(
+            execution_mode=args.risk_db_mode,
+            explicit_db_path=args.risk_db or None,
+        )
         risk_cmd = [
             PYTHON,
             "scripts/report_position_groups.py",
             "--db",
-            str(PROJECT_ROOT / "data" / "paper_trades.db"),
+            risk_db,
             "--max-violation-rate",
             str(args.max_violation_rate),
             "--max-violation-ratio",

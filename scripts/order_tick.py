@@ -30,10 +30,10 @@ log = logging.getLogger(__name__)
 def main() -> None:
     from src.config import settings
     from src.scheduler.order_manager import check_and_manage_orders
-    from src.store.db import DEFAULT_DB_PATH
+    from src.store.db_path import resolve_db_path
 
     execution_mode = settings.execution_mode
-    db_path = str(DEFAULT_DB_PATH)
+    db_path = resolve_db_path(execution_mode=execution_mode)
 
     # paper/dry-run は即座に終了
     if execution_mode != "live":

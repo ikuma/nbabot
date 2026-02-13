@@ -17,7 +17,8 @@ set -euo pipefail
 
 PROJECT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 PYTHON="${PROJECT_DIR}/.venv/bin/python"
-DB_PATH="${PROJECT_DIR}/data/paper_trades.db"
+DB_MODE="${DB_MODE:-live}"
+DB_PATH="${DB_PATH:-}"
 
 WITH_SHADOW=0
 SHADOW_MODE="dry-run" # dry-run is default to reduce side effects
@@ -51,6 +52,17 @@ done
 if [[ ! -x "${PYTHON}" ]]; then
     echo "ERROR: python not found: ${PYTHON}"
     exit 2
+fi
+
+if [[ -z "${DB_PATH}" ]]; then
+    DB_PATH="$("${PYTHON}" - <<PY
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path("${PROJECT_DIR}")))
+from src.store.db_path import resolve_db_path
+print(resolve_db_path(execution_mode="${DB_MODE}"))
+PY
+)"
 fi
 
 if [[ ! -f "${DB_PATH}" ]]; then

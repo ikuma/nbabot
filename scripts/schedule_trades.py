@@ -44,7 +44,8 @@ def main() -> None:
         process_position_groups_tick,
         refresh_schedule,
     )
-    from src.store.db import DEFAULT_DB_PATH, cancel_expired_jobs
+    from src.store.db import cancel_expired_jobs
+    from src.store.db_path import resolve_db_path
 
     parser = argparse.ArgumentParser(description="Per-game trade scheduler")
     parser.add_argument(
@@ -69,7 +70,7 @@ def main() -> None:
     execution_mode = args.execution or settings.execution_mode
     now_et = datetime.now(timezone.utc).astimezone(ET)
     now_utc = datetime.now(timezone.utc).isoformat()
-    db_path = str(DEFAULT_DB_PATH)
+    db_path = resolve_db_path(execution_mode=execution_mode)
 
     # ゲーム日付: today + tomorrow (ET) の両日を探索 — タイムゾーン境界対策
     # NBA.com のゲーム日付は ET ベースだが、境界付近で日付がずれるケースがある。
@@ -89,6 +90,7 @@ def main() -> None:
         "+".join(dates_to_refresh),
         execution_mode,
     )
+    log.info("DB path: %s", db_path)
 
     # 0. リスクチェック
     risk_level_name = "GREEN"
@@ -160,16 +162,20 @@ def main() -> None:
     # 1. スケジュール更新 — today + tomorrow (ET) を探索
     new_jobs = 0
     for d in dates_to_refresh:
-        new_jobs += refresh_schedule(d)
+        new_jobs += refresh_schedule(d, db_path=db_path)
     log.info("Schedule refresh (%s): %d new job(s)", "+".join(dates_to_refresh), new_jobs)
 
     # 2. 期限切れ処理
-    expired = cancel_expired_jobs(now_utc)
+    expired = cancel_expired_jobs(now_utc, db_path=db_path)
     if expired:
         log.info("Expired %d job(s)", expired)
 
     # 3. 窓内ジョブ実行 (初回エントリー)
-    results = process_eligible_jobs(execution_mode, sizing_multiplier=sizing_multiplier)
+    results = process_eligible_jobs(
+        execution_mode,
+        db_path=db_path,
+        sizing_multiplier=sizing_multiplier,
+    )
 
     executed = [r for r in results if r.status == "executed"]
     skipped = [r for r in results if r.status == "skipped"]
@@ -183,7 +189,7 @@ def main() -> None:
     )
 
     # 3b. DCA アクティブジョブ処理
-    dca_results = process_dca_active_jobs(execution_mode)
+    dca_results = process_dca_active_jobs(execution_mode, db_path=db_path)
     dca_executed = [r for r in dca_results if r.status == "executed"]
     dca_failed = [r for r in dca_results if r.status == "failed"]
 
@@ -195,7 +201,7 @@ def main() -> None:
         )
 
     # 3c. MERGE 処理 (bothside DCA 完了後)
-    merge_results = process_merge_eligible(execution_mode)
+    merge_results = process_merge_eligible(execution_mode, db_path=db_path)
     merge_executed = [r for r in merge_results if r.status == "executed"]
     merge_failed = [r for r in merge_results if r.status == "failed"]
 
@@ -216,7 +222,7 @@ def main() -> None:
         try:
             from src.settlement.settler import auto_settle
 
-            settle_summary = auto_settle()
+            settle_summary = auto_settle(db_path=db_path)
             if settle_summary.settled:
                 log.info("Auto-settle: %s", settle_summary.format_summary())
         except Exception:
@@ -257,6 +263,7 @@ def main() -> None:
             dca_results=dca_results,
             merge_results=merge_results,
             execution_mode=execution_mode,
+            db_path=db_path,
         )
         if summary_text:
             from src.notifications.telegram import send_message

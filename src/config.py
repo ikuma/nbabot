@@ -70,6 +70,9 @@ class Settings(BaseSettings):
     # === Execution ===
     execution_mode: str = "paper"  # "paper" | "live" | "dry-run"
     min_balance_usd: float = 50.0
+    paper_db_path: str = "data/paper_trades.db"
+    live_db_path: str = "data/live_trades.db"
+    dry_run_db_path: str = ""
 
     # === Capital management ===
     scan_moneyline: bool = True

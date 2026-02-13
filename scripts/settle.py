@@ -16,6 +16,9 @@ Usage:
 
     # List unsettled signals
     python scripts/settle.py --list
+
+    # Settle against live DB
+    python scripts/settle.py --auto --execution live
 """
 
 from __future__ import annotations
@@ -104,6 +107,8 @@ def interactive_settle(db_path: Path | str | None = None) -> None:
 
 
 def main() -> None:
+    from src.store.db_path import resolve_db_path
+
     parser = argparse.ArgumentParser(description="Settle paper-trade signals")
     parser.add_argument("--list", action="store_true", help="List unsettled signals")
     parser.add_argument("--auto", action="store_true", help="Auto-settle via NBA.com scores")
@@ -114,12 +119,25 @@ def main() -> None:
     )
     parser.add_argument("--signal-id", type=int, help="Settle a specific signal by ID")
     parser.add_argument("--winner", type=str, help="Winner team name (with --signal-id)")
+    parser.add_argument(
+        "--execution",
+        choices=["paper", "live", "dry-run"],
+        default=None,
+        help="Execution mode for DB selection (default: settings.execution_mode)",
+    )
+    parser.add_argument(
+        "--db",
+        type=str,
+        default=None,
+        help="Override DB path explicitly",
+    )
     args = parser.parse_args()
+    db_path = resolve_db_path(execution_mode=args.execution, explicit_db_path=args.db)
 
     if args.list:
-        list_unsettled()
+        list_unsettled(db_path=db_path)
     elif args.auto:
-        summary = auto_settle(dry_run=args.dry_run)
+        summary = auto_settle(dry_run=args.dry_run, db_path=db_path)
         print(summary.format_summary())
         # Telegram 通知 (dry-run 時はスキップ)
         if summary.settled and not args.dry_run:
@@ -130,11 +148,11 @@ def main() -> None:
             except Exception:
                 log.exception("Failed to send Telegram notification")
     elif args.signal_id and args.winner:
-        settle_signal(args.signal_id, args.winner)
+        settle_signal(args.signal_id, args.winner, db_path=db_path)
     elif args.signal_id and not args.winner:
         parser.error("--winner is required with --signal-id")
     else:
-        interactive_settle()
+        interactive_settle(db_path=db_path)
 
 
 if __name__ == "__main__":

@@ -18,6 +18,7 @@
 - スケジューラー: `python scripts/schedule_trades.py`
 - スケジューラー dry-run: `python scripts/schedule_trades.py --execution dry-run`
 - 未来日付 dry-run: `python scripts/schedule_trades.py --date 2026-02-10 --execution dry-run`
+- 決済（live DB）: `python scripts/settle.py --auto --execution live`
 - 手動スキャン: `python scripts/scan.py`
 - モード指定スキャン: `python scripts/scan.py --mode calibration|bookmaker|both`
 - 自動決済: `python scripts/settle.py --auto`
@@ -29,6 +30,12 @@
 - PositionGroup監査/違反率レポート: `python scripts/report_position_groups.py --db data/paper_trades.db`
 - PositionGroup戦略比較バックテスト(JSON): `python scripts/run_position_group_backtest.py --input <dataset.json>`
 - PositionGroup戦略比較バックテスト(DB): `python scripts/run_position_group_backtest.py --db data/paper_trades.db`
+
+## DB分離
+
+- `PAPER_DB_PATH`: paper運用のDB（例: `data/paper_trades.db`）
+- `LIVE_DB_PATH`: live運用のDB（例: `data/live_trades.db`）
+- `DRY_RUN_DB_PATH`: dry-run専用DB（空なら `PAPER_DB_PATH`）
 
 ## launchd
 
