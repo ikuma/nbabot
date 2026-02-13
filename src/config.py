@@ -39,6 +39,28 @@ class Settings(BaseSettings):
     calibration_drift_threshold: float = 2.0
     max_total_exposure_pct: float = 30.0
     risk_max_single_game_usd: float = 200.0
+    # PnL divergence drift (Phase drift-upgrade)
+    pnl_divergence_short_days: int = 7
+    pnl_divergence_long_days: int = 28
+    pnl_divergence_min_total_short: int = 30
+    pnl_divergence_min_total_long: int = 80
+    pnl_divergence_min_band_short: int = 10
+    pnl_divergence_yellow_total_gap_pct: float = -15.0
+    pnl_divergence_yellow_total_gap_usd: float = -50.0
+    pnl_divergence_yellow_band_gap_pct: float = -20.0
+    pnl_divergence_yellow_band_gap_usd: float = -20.0
+    pnl_divergence_yellow_band_count: int = 2
+    pnl_divergence_orange_short_gap_pct: float = -25.0
+    pnl_divergence_orange_short_gap_usd: float = -100.0
+    pnl_divergence_orange_long_gap_pct: float = -10.0
+    # Structural change detection (CUSUM)
+    structural_change_window_days: int = 28
+    structural_change_cusum_k: float = 0.5
+    structural_change_cusum_h_yellow: float = 4.5
+    structural_change_cusum_h_orange: float = 6.0
+    structural_change_min_points: int = 8
+    structural_change_yellow_band_count: int = 1
+    structural_change_orange_band_count: int = 2
 
     # === Calibration strategy ===
     strategy_mode: str = "calibration"  # "calibration" | "bookmaker"

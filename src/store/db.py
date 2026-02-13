@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 # Re-export models and schema for backward compatibility
@@ -1432,6 +1432,174 @@ def get_band_decomposed_stats(
                 "total": int(row["total"]),
             }
         return result
+    finally:
+        conn.close()
+
+
+def get_expected_realized_gap_summary(
+    days: int = 7,
+    as_of_date: str | None = None,
+    strategy_mode: str = "calibration",
+    db_path: Path | str = DEFAULT_DB_PATH,
+) -> dict:
+    """Aggregate expected vs realized PnL for a rolling window.
+
+    Expected PnL follows expectation_tracker:
+    ev_per_dollar = expected_win_rate / poly_price - 1, ev_per_dollar > 0
+    expected_pnl = ev_per_dollar * kelly_size
+    """
+    if days <= 0:
+        return {
+            "expected_pnl": 0.0,
+            "realized_pnl": 0.0,
+            "gap_usd": 0.0,
+            "gap_pct": 0.0,
+            "total": 0,
+        }
+
+    if as_of_date:
+        end_dt = datetime.strptime(as_of_date, "%Y-%m-%d")
+    else:
+        end_dt = datetime.now(timezone.utc)
+    start_date = (end_dt - timedelta(days=days - 1)).strftime("%Y-%m-%d")
+
+    conn = _connect(db_path)
+    try:
+        row = conn.execute(
+            """SELECT
+                 COALESCE(
+                     SUM(((s.expected_win_rate / s.poly_price) - 1.0) * s.kelly_size),
+                     0.0
+                 ) AS expected_pnl,
+                 COALESCE(SUM(r.pnl), 0.0) AS realized_pnl,
+                 COUNT(*) AS total
+               FROM results r
+               JOIN signals s ON s.id = r.signal_id
+               WHERE date(r.settled_at) >= ?
+                 AND s.strategy_mode = ?
+                 AND s.expected_win_rate IS NOT NULL
+                 AND s.expected_win_rate > 0
+                 AND s.poly_price > 0
+                 AND ((s.expected_win_rate / s.poly_price) - 1.0) > 0""",
+            (start_date, strategy_mode),
+        ).fetchone()
+        expected_pnl = float(row["expected_pnl"])
+        realized_pnl = float(row["realized_pnl"])
+        gap_usd = realized_pnl - expected_pnl
+        gap_pct = gap_usd / abs(expected_pnl) * 100 if expected_pnl != 0 else 0.0
+        return {
+            "expected_pnl": expected_pnl,
+            "realized_pnl": realized_pnl,
+            "gap_usd": gap_usd,
+            "gap_pct": gap_pct,
+            "total": int(row["total"]),
+        }
+    finally:
+        conn.close()
+
+
+def get_expected_realized_gap_by_band(
+    days: int = 7,
+    as_of_date: str | None = None,
+    strategy_mode: str = "calibration",
+    db_path: Path | str = DEFAULT_DB_PATH,
+) -> dict[str, dict]:
+    """Aggregate expected vs realized PnL by price band for a rolling window."""
+    if days <= 0:
+        return {}
+
+    if as_of_date:
+        end_dt = datetime.strptime(as_of_date, "%Y-%m-%d")
+    else:
+        end_dt = datetime.now(timezone.utc)
+    start_date = (end_dt - timedelta(days=days - 1)).strftime("%Y-%m-%d")
+
+    conn = _connect(db_path)
+    try:
+        rows = conn.execute(
+            """SELECT
+                 s.price_band AS band,
+                 COALESCE(
+                     SUM(((s.expected_win_rate / s.poly_price) - 1.0) * s.kelly_size),
+                     0.0
+                 ) AS expected_pnl,
+                 COALESCE(SUM(r.pnl), 0.0) AS realized_pnl,
+                 COUNT(*) AS total
+               FROM results r
+               JOIN signals s ON s.id = r.signal_id
+               WHERE date(r.settled_at) >= ?
+                 AND s.strategy_mode = ?
+                 AND s.price_band IS NOT NULL
+                 AND s.price_band != ''
+                 AND s.expected_win_rate IS NOT NULL
+                 AND s.expected_win_rate > 0
+                 AND s.poly_price > 0
+                 AND ((s.expected_win_rate / s.poly_price) - 1.0) > 0
+               GROUP BY s.price_band""",
+            (start_date, strategy_mode),
+        ).fetchall()
+        result: dict[str, dict] = {}
+        for row in rows:
+            expected_pnl = float(row["expected_pnl"])
+            realized_pnl = float(row["realized_pnl"])
+            gap_usd = realized_pnl - expected_pnl
+            gap_pct = gap_usd / abs(expected_pnl) * 100 if expected_pnl != 0 else 0.0
+            result[row["band"]] = {
+                "expected_pnl": expected_pnl,
+                "realized_pnl": realized_pnl,
+                "gap_usd": gap_usd,
+                "gap_pct": gap_pct,
+                "total": int(row["total"]),
+            }
+        return result
+    finally:
+        conn.close()
+
+
+def get_daily_gap_series(
+    days: int = 28,
+    as_of_date: str | None = None,
+    band_label: str | None = None,
+    strategy_mode: str = "calibration",
+    db_path: Path | str = DEFAULT_DB_PATH,
+) -> list[float]:
+    """Return daily gap_usd series (realized - expected) for CUSUM change detection."""
+    if days <= 0:
+        return []
+
+    if as_of_date:
+        end_dt = datetime.strptime(as_of_date, "%Y-%m-%d")
+    else:
+        end_dt = datetime.now(timezone.utc)
+    start_date = (end_dt - timedelta(days=days - 1)).strftime("%Y-%m-%d")
+
+    sql = """SELECT
+               date(r.settled_at) AS d,
+               COALESCE(
+                   SUM(((s.expected_win_rate / s.poly_price) - 1.0) * s.kelly_size),
+                   0.0
+               ) AS expected_pnl,
+               COALESCE(SUM(r.pnl), 0.0) AS realized_pnl
+             FROM results r
+             JOIN signals s ON s.id = r.signal_id
+             WHERE date(r.settled_at) >= ?
+               AND s.strategy_mode = ?
+               AND s.expected_win_rate IS NOT NULL
+               AND s.expected_win_rate > 0
+               AND s.poly_price > 0
+               AND ((s.expected_win_rate / s.poly_price) - 1.0) > 0"""
+    params: list[object] = [start_date, strategy_mode]
+
+    if band_label:
+        sql += " AND s.price_band = ?"
+        params.append(band_label)
+
+    sql += " GROUP BY date(r.settled_at) ORDER BY d ASC"
+
+    conn = _connect(db_path)
+    try:
+        rows = conn.execute(sql, tuple(params)).fetchall()
+        return [float(r["realized_pnl"]) - float(r["expected_pnl"]) for r in rows]
     finally:
         conn.close()
 

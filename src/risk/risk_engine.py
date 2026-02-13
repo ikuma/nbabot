@@ -84,20 +84,69 @@ def compute_risk_state(db_path: Path | str) -> RiskState:
     prev_multiplier = prev.sizing_multiplier if prev else 1.0
 
     # 校正ドリフトフラグ
-    flags: list[str] = []
+    flags: set[str] = set()
     try:
-        from src.risk.calibration_monitor import compute_calibration_health
+        from src.risk.calibration_monitor import (
+            compute_calibration_health,
+            compute_pnl_divergence_health,
+            compute_structural_change_health,
+            evaluate_pnl_divergence_flags,
+            evaluate_structural_change_flags,
+        )
 
-        health = compute_calibration_health(db_path)
+        health = compute_calibration_health(
+            db_path,
+            drift_threshold_sigma=settings.calibration_drift_threshold,
+        )
         drifted_bands = [h for h in health if h.drifted]
         if drifted_bands:
-            flags.append("calibration_drift")
+            flags.add("calibration_drift")
+
+        pnl_health = compute_pnl_divergence_health(
+            db_path,
+            as_of_date=today_str,
+            short_days=settings.pnl_divergence_short_days,
+            long_days=settings.pnl_divergence_long_days,
+        )
+        flags.update(
+            evaluate_pnl_divergence_flags(
+                pnl_health,
+                min_total_short=settings.pnl_divergence_min_total_short,
+                min_total_long=settings.pnl_divergence_min_total_long,
+                min_band_short=settings.pnl_divergence_min_band_short,
+                yellow_total_gap_pct=settings.pnl_divergence_yellow_total_gap_pct,
+                yellow_total_gap_usd=settings.pnl_divergence_yellow_total_gap_usd,
+                yellow_band_gap_pct=settings.pnl_divergence_yellow_band_gap_pct,
+                yellow_band_gap_usd=settings.pnl_divergence_yellow_band_gap_usd,
+                yellow_band_count=settings.pnl_divergence_yellow_band_count,
+                orange_short_gap_pct=settings.pnl_divergence_orange_short_gap_pct,
+                orange_short_gap_usd=settings.pnl_divergence_orange_short_gap_usd,
+                orange_long_gap_pct=settings.pnl_divergence_orange_long_gap_pct,
+            )
+        )
+
+        structural_health = compute_structural_change_health(
+            db_path,
+            as_of_date=today_str,
+            window_days=settings.structural_change_window_days,
+            cusum_k=settings.structural_change_cusum_k,
+            cusum_h_yellow=settings.structural_change_cusum_h_yellow,
+            cusum_h_orange=settings.structural_change_cusum_h_orange,
+        )
+        flags.update(
+            evaluate_structural_change_flags(
+                structural_health,
+                min_points=settings.structural_change_min_points,
+                yellow_band_count=settings.structural_change_yellow_band_count,
+                orange_band_count=settings.structural_change_orange_band_count,
+            )
+        )
     except Exception:
         logger.warning("Calibration health check failed, skipping")
 
     # 残高急変検出
     if detect_balance_anomaly(current_balance, last_balance):
-        flags.append("balance_anomaly")
+        flags.add("balance_anomaly")
 
     state = RiskState(
         daily_pnl=daily_pnl,
@@ -112,7 +161,7 @@ def compute_risk_state(db_path: Path | str) -> RiskState:
         circuit_breaker_level=prev_level,
         sizing_multiplier=prev_multiplier,
         lockout_until=prev_lockout,
-        flags=flags,
+        flags=sorted(flags),
         checked_at=now.isoformat(),
     )
 
@@ -154,13 +203,22 @@ def evaluate_circuit_breaker(
     if state.max_drawdown_pct >= dd_limit:
         return CircuitBreakerLevel.RED, f"drawdown={state.max_drawdown_pct:.1f}%>={dd_limit}%"
 
-    # ORANGE: 日次損失 >= 限度 OR 校正ドリフト
+    # ORANGE: 日次損失 >= 限度 OR PnL乖離(重度) OR 構造変化(重度) OR 校正ドリフト
     if state.daily_loss_pct >= daily_limit:
         return CircuitBreakerLevel.ORANGE, f"daily_loss={state.daily_loss_pct:.1f}%>={daily_limit}%"
+    if "pnl_divergence_orange" in state.flags:
+        return CircuitBreakerLevel.ORANGE, "pnl_divergence_orange"
+    if "structural_change_orange" in state.flags:
+        return CircuitBreakerLevel.ORANGE, "structural_change_orange"
     if "calibration_drift" in state.flags:
         return CircuitBreakerLevel.ORANGE, "calibration_drift"
 
-    # YELLOW: 日次損失 >= 限度の50% OR 連敗 >= 5
+    # YELLOW: 乖離/構造変化(軽度) OR 日次損失 >= 限度の50% OR 連敗 >= 5
+    if "pnl_divergence_yellow" in state.flags:
+        return CircuitBreakerLevel.YELLOW, "pnl_divergence_yellow"
+    if "structural_change_yellow" in state.flags:
+        return CircuitBreakerLevel.YELLOW, "structural_change_yellow"
+
     half_limit = daily_limit * 0.5
     if state.daily_loss_pct >= half_limit:
         return CircuitBreakerLevel.YELLOW, (

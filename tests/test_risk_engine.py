@@ -117,6 +117,38 @@ class TestEvaluateCircuitBreaker:
         assert level == CircuitBreakerLevel.ORANGE
         assert "calibration_drift" in trigger
 
+    def test_orange_pnl_divergence(self):
+        from src.risk.risk_engine import evaluate_circuit_breaker
+
+        state = RiskState(flags=["pnl_divergence_orange"], current_balance=1000.0)
+        level, trigger = evaluate_circuit_breaker(state)
+        assert level == CircuitBreakerLevel.ORANGE
+        assert "pnl_divergence_orange" in trigger
+
+    def test_orange_structural_change(self):
+        from src.risk.risk_engine import evaluate_circuit_breaker
+
+        state = RiskState(flags=["structural_change_orange"], current_balance=1000.0)
+        level, trigger = evaluate_circuit_breaker(state)
+        assert level == CircuitBreakerLevel.ORANGE
+        assert "structural_change_orange" in trigger
+
+    def test_yellow_pnl_divergence(self):
+        from src.risk.risk_engine import evaluate_circuit_breaker
+
+        state = RiskState(flags=["pnl_divergence_yellow"], current_balance=1000.0)
+        level, trigger = evaluate_circuit_breaker(state)
+        assert level == CircuitBreakerLevel.YELLOW
+        assert "pnl_divergence_yellow" in trigger
+
+    def test_yellow_structural_change(self):
+        from src.risk.risk_engine import evaluate_circuit_breaker
+
+        state = RiskState(flags=["structural_change_yellow"], current_balance=1000.0)
+        level, trigger = evaluate_circuit_breaker(state)
+        assert level == CircuitBreakerLevel.YELLOW
+        assert "structural_change_yellow" in trigger
+
     def test_red_weekly_loss(self):
         from src.risk.risk_engine import evaluate_circuit_breaker
 
