@@ -8,6 +8,10 @@ from __future__ import annotations
 from collections import defaultdict
 from datetime import datetime
 from statistics import mean, median
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from src.analysis.metrics import DecomposedMetrics, MergeProfileMetrics
 
 
 def generate_report(
@@ -15,6 +19,8 @@ def generate_report(
     games: list[dict],
     trader_name: str = "Trader",
     expectation_gaps: list | None = None,
+    decomposed: DecomposedMetrics | None = None,
+    merge_metrics: MergeProfileMetrics | None = None,
 ) -> str:
     """Generate a full P&L report as Markdown."""
     out: list[str] = []
@@ -78,25 +84,33 @@ def generate_report(
         out.append("| Metric | Count | Rate |")
         out.append("|--------|-------|------|")
 
-        # Game correct rate: WIN conditions picked the right side
-        game_correct = len(wins)
-        # Only WIN/LOSS have game outcome; MERGED are excluded
-        game_total = len(wins) + len(losses)
-        gcr = game_correct / game_total * 100 if game_total > 0 else 0
-        out.append(
-            f"| Game Correct | {game_correct}/{game_total} | {gcr:.1f}% |"
-        )
-
-        # Trade profit rate: P&L > 0
-        trade_profitable = sum(1 for c in conditions.values() if c["pnl"] > 0)
-        tpr = trade_profitable / total_settled * 100 if total_settled > 0 else 0
-        out.append(
-            f"| Trade Profitable | {trade_profitable}/{total_settled} | {tpr:.1f}% |"
-        )
-
-        # Merge rate: conditions settled via MERGE
-        mr = len(merged) / total_settled * 100 if total_settled > 0 else 0
-        out.append(f"| MERGE Settled | {len(merged)}/{total_settled} | {mr:.1f}% |")
+        if decomposed is not None:
+            gcr = decomposed.game_correct_rate * 100
+            game_total = decomposed.game_correct_count + decomposed.game_incorrect_count
+            out.append(
+                f"| Game Correct | {decomposed.game_correct_count}/{game_total} | {gcr:.1f}% |"
+            )
+            tpr = decomposed.trade_profit_rate * 100
+            out.append(
+                f"| Trade Profitable | {decomposed.trade_profitable_count}/"
+                f"{decomposed.total_settled} | {tpr:.1f}% |"
+            )
+            mr = decomposed.merge_rate * 100
+            out.append(
+                f"| MERGE Settled | {decomposed.merge_settled_count}/"
+                f"{decomposed.total_settled} | {mr:.1f}% |"
+            )
+        else:
+            # Fallback: compute inline from conditions
+            game_correct = len(wins)
+            game_total = len(wins) + len(losses)
+            gcr = game_correct / game_total * 100 if game_total > 0 else 0
+            out.append(f"| Game Correct | {game_correct}/{game_total} | {gcr:.1f}% |")
+            trade_profitable = sum(1 for c in conditions.values() if c["pnl"] > 0)
+            tpr = trade_profitable / total_settled * 100 if total_settled > 0 else 0
+            out.append(f"| Trade Profitable | {trade_profitable}/{total_settled} | {tpr:.1f}% |")
+            mr = len(merged) / total_settled * 100 if total_settled > 0 else 0
+            out.append(f"| MERGE Settled | {len(merged)}/{total_settled} | {mr:.1f}% |")
         out.append("")
 
     # WIN
@@ -127,6 +141,19 @@ def generate_report(
         f"- Cost: ${merge_cost:,.2f} -> Payout: ${merge_payout:,.2f} -> P&L: ${merge_pnl:,.2f}"
     )
     out.append("")
+
+    # MERGE Profile (from metrics)
+    if merge_metrics is not None and merge_metrics.merge_count > 0:
+        out.append("### MERGE Profile")
+        out.append("")
+        out.append("| Metric | Value |")
+        out.append("|--------|-------|")
+        out.append(f"| MERGE Count | {merge_metrics.merge_count:,} |")
+        out.append(f"| MERGE Recovery | ${merge_metrics.merge_recovery_usd:,.2f} |")
+        out.append(f"| MERGE P&L | ${merge_metrics.merge_pnl:,.2f} |")
+        out.append(f"| Recovery % | {merge_metrics.merge_recovery_pct:.1f}% |")
+        out.append(f"| Avg MERGE Profit | ${merge_metrics.avg_merge_profit:,.2f} |")
+        out.append("")
 
     # -- 2. Category / Sport P&L --
     out.append("---")
@@ -383,6 +410,35 @@ def generate_report(
             pct = cnt / len(game_pnls) * 100
             bar = "#" * int(pct / 2)
             out.append(f"| {label:>15} | {cnt:,} | {pct:.1f}% {bar} |")
+        out.append("")
+
+    # -- 7b. Holding Duration Distribution --
+    holding_hours_list = [
+        c.get("holding_hours", 0) for c in conditions.values() if c.get("holding_hours", 0) > 0
+    ]
+    if holding_hours_list:
+        out.append("---")
+        out.append("## 7b. Holding Duration Distribution")
+        out.append("")
+        out.append(f"- **Mean**: {mean(holding_hours_list):.1f} hours")
+        out.append(f"- **Median**: {median(holding_hours_list):.1f} hours")
+        out.append("")
+
+        duration_buckets = [
+            ("<1h", lambda h: h < 1),
+            ("1-6h", lambda h: 1 <= h < 6),
+            ("6-24h", lambda h: 6 <= h < 24),
+            ("1-3d", lambda h: 24 <= h < 72),
+            ("3-7d", lambda h: 72 <= h < 168),
+            (">7d", lambda h: h >= 168),
+        ]
+        out.append("| Duration | Count | % |")
+        out.append("|----------|-------|---|")
+        for label, fn in duration_buckets:
+            cnt = sum(1 for h in holding_hours_list if fn(h))
+            pct = cnt / len(holding_hours_list) * 100
+            bar = "#" * int(pct / 2)
+            out.append(f"| {label:>8} | {cnt:,} | {pct:.1f}% {bar} |")
         out.append("")
 
     # -- 8. Streaks --

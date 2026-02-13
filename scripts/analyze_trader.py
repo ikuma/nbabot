@@ -25,7 +25,17 @@ REGISTRY_PATH = TRADERS_DIR / "registry.json"
 # パッケージ import のため
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from src.analysis.pnl import aggregate_by_game, build_condition_pnl, generate_report  # noqa: E402
+from src.analysis.metrics import (  # noqa: E402
+    compute_decomposed_from_conditions,
+    compute_merge_metrics,
+)
+from src.analysis.pnl import (  # noqa: E402
+    DataQualityReport,
+    aggregate_by_game,
+    build_condition_pnl,
+    detect_data_quality_issues,
+    generate_report,
+)
 from src.analysis.strategy_profile import build_profile  # noqa: E402
 
 
@@ -83,22 +93,26 @@ def analyze_trader(
     lb_pnl = lb_entry.get("pnl", 0) if lb_entry else 0
     lb_volume = lb_entry.get("volume", 0) if lb_entry else 0
 
+    # データ品質分析
+    dq_report: DataQualityReport = detect_data_quality_issues(conditions)
     calc_pnl = sum(c["pnl"] for c in conditions.values())
-    missing = sum(
-        1 for c in conditions.values() if c.get("data_quality") == "missing_trades"
-    )
-    missing_pnl = sum(
-        c["pnl"]
-        for c in conditions.values()
-        if c.get("data_quality") == "missing_trades"
-    )
+    missing = dq_report.missing_trade_conditions
 
     if lb_pnl and abs(calc_pnl - lb_pnl) / max(abs(lb_pnl), 1) > 0.2:
         print(f"  ⚠ PnL MISMATCH: Calculated ${calc_pnl:,.0f} vs Leaderboard ${lb_pnl:,.0f}")
-        print(f"    {missing} conditions missing TRADE data (${missing_pnl:,.0f} phantom PnL)")
+        print(
+            f"    {missing} conditions missing TRADE data "
+            f"(${dq_report.phantom_pnl:,.0f} phantom PnL)"
+        )
         data_quality = "incomplete"
+    elif dq_report.quality_score == "suspect":
+        data_quality = "suspect"
     else:
-        data_quality = "complete"
+        data_quality = dq_report.quality_score
+
+    # Decomposed metrics + MERGE metrics
+    decomposed = compute_decomposed_from_conditions(conditions)
+    merge_met = compute_merge_metrics(conditions)
 
     # Strategy profile
     profile = build_profile(
@@ -112,6 +126,13 @@ def analyze_trader(
         missing_trade_conditions=missing,
     )
     profile_dict = profile.to_dict()
+
+    # プロファイルに追加メトリクス + データ品質レポートを保存
+    from dataclasses import asdict
+
+    profile_dict["decomposed_metrics"] = asdict(decomposed)
+    profile_dict["merge_metrics"] = asdict(merge_met)
+    profile_dict["data_quality_report"] = asdict(dq_report)
 
     # 保存
     with open(trader_dir / "strategy_profile.json", "w") as f:
@@ -128,7 +149,13 @@ def analyze_trader(
             json.dump(games, f, indent=2, ensure_ascii=False)
 
         # Full report
-        report = generate_report(conditions, games, trader_name=username)
+        report = generate_report(
+            conditions,
+            games,
+            trader_name=username,
+            decomposed=decomposed,
+            merge_metrics=merge_met,
+        )
         with open(trader_dir / "pnl_report.md", "w") as f:
             f.write(report)
         print(f"  Report: {trader_dir / 'pnl_report.md'}")

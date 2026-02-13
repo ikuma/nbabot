@@ -3,16 +3,19 @@
 from __future__ import annotations
 
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
 from src.scheduler.hedge_executor import (
     _schedule_hedge_job,
+    process_hedge_job,
 )
 from src.store.db import (
+    TradeJob,
     _connect,
     get_hedge_job_for_slug,
+    log_signal,
     upsert_trade_job,
 )
 from src.strategy.calibration_scanner import BothsideOpportunity, CalibrationOpportunity
@@ -184,3 +187,281 @@ class TestHedgeIndependentDca:
         ).fetchone()
         conn.close()
         assert dir_row[0] == hedge.bothside_group_id
+
+
+def _make_moneyline(
+    outcomes=("Knicks", "Celtics"),
+    prices=(0.855, 0.14),
+    token_ids=("tok_knicks", "tok_celtics"),
+    slug="nba-nyk-bos-2026-02-10",
+):
+    """Create a MoneylineMarket for hedge tests."""
+    from src.connectors.polymarket import MoneylineMarket
+
+    return MoneylineMarket(
+        condition_id="cond_test",
+        event_slug=slug,
+        event_title="Knicks vs Celtics",
+        home_team="Boston Celtics",
+        away_team="New York Knicks",
+        outcomes=list(outcomes),
+        prices=list(prices),
+        token_ids=list(token_ids),
+        sports_market_type="moneyline",
+        active=True,
+    )
+
+
+def _create_hedge_job(
+    db_path: Path, dir_price: float = 0.855, dir_team: str = "Knicks"
+) -> tuple[TradeJob, int]:
+    """Insert directional + hedge job pair and return (hedge TradeJob, dir_signal_id)."""
+    # directional ジョブ作成
+    dir_job_id = _insert_job(db_path)
+
+    # directional シグナル作成
+    dir_signal_id = log_signal(
+        game_title="Knicks vs Celtics",
+        event_slug="nba-nyk-bos-2026-02-10",
+        team=dir_team,
+        side="BUY",
+        poly_price=dir_price,
+        book_prob=0.0,
+        edge_pct=5.0,
+        kelly_size=25.0,
+        token_id="tok_knicks",
+        strategy_mode="calibration",
+        signal_role="directional",
+        dca_group_id="dca_dir_001",
+        dca_sequence=1,
+        db_path=db_path,
+    )
+
+    # directional ジョブに dca_group_id をセット
+    conn = _connect(db_path)
+    conn.execute(
+        "UPDATE trade_jobs SET dca_group_id = ? WHERE id = ?", ("dca_dir_001", dir_job_id)
+    )
+    conn.commit()
+    conn.close()
+
+    # hedge ジョブ作成
+    _insert_job(db_path, job_side="hedge", event_slug="nba-nyk-bos-2026-02-10")
+    conn = _connect(db_path)
+    row = conn.execute(
+        "SELECT * FROM trade_jobs WHERE event_slug = ? AND job_side = 'hedge'",
+        ("nba-nyk-bos-2026-02-10",),
+    ).fetchone()
+    conn.execute(
+        "UPDATE trade_jobs SET paired_job_id = ?, bothside_group_id = ? WHERE id = ?",
+        (dir_job_id, "bs_group_001", row["id"]),
+    )
+    conn.commit()
+    row = conn.execute(
+        "SELECT * FROM trade_jobs WHERE id = ?", (row["id"],)
+    ).fetchone()
+    conn.close()
+
+    hedge_job = TradeJob(**dict(row))
+    return hedge_job, dir_signal_id
+
+
+class TestHedgeMergeOnlyOutOfRange:
+    """校正カーブ域外 (price < 0.20) でも MERGE-only パスで hedge が実行されることを検証."""
+
+    @patch("src.scheduler.hedge_executor._compute_hedge_order_price")
+    @patch("src.strategy.calibration_curve.get_default_curve")
+    @patch("src.scheduler.hedge_executor._preflight_check")
+    @patch("src.scheduler.hedge_executor.settings")
+    def test_out_of_range_hedge_reaches_merge_only_path(
+        self,
+        mock_settings,
+        mock_preflight,
+        mock_curve_factory,
+        mock_order_price,
+        db_path,
+    ):
+        """price=0.14 → curve.estimate()=None → MERGE-only path → dca_active."""
+        # Settings
+        mock_settings.bothside_target_combined = 0.97
+        mock_settings.bothside_target_combined_max = 0.998
+        mock_settings.bothside_target_combined_min = 0.94
+        mock_settings.bothside_target_mode = "dynamic"
+        mock_settings.bothside_max_combined_vwap = 0.998
+        mock_settings.bothside_dynamic_estimated_fee_usd = 0.05
+        mock_settings.merge_min_profit_usd = 0.10
+        mock_settings.merge_est_gas_usd = 0.05
+        mock_settings.merge_min_shares_floor = 20.0
+        mock_settings.bothside_hedge_kelly_mult = 0.5
+        mock_settings.dca_max_entries = 3
+        mock_settings.max_position_usd = 100.0
+        mock_settings.capital_risk_pct = 2.0
+        mock_settings.sweet_spot_lo = 0.20
+        mock_settings.sweet_spot_hi = 0.55
+        mock_settings.llm_analysis_enabled = False
+
+        # 注文板 → order_price=0.13 (below market)
+        mock_order_price.return_value = (0.14, 0.13)
+
+        # 校正カーブが None を返す (域外)
+        mock_curve = MagicMock()
+        mock_curve.estimate.return_value = None
+        mock_curve_factory.return_value = mock_curve
+
+        mock_preflight.return_value = True
+
+        hedge_job, _ = _create_hedge_job(db_path)
+
+        # Moneyline: Knicks @ 0.855, Celtics @ 0.14
+        ml = _make_moneyline()
+
+        mock_log_signal = MagicMock(return_value=999)
+        mock_place = MagicMock(return_value={"orderID": "ord_hedge_001"})
+        mock_update_order = MagicMock()
+
+        result = process_hedge_job(
+            job=hedge_job,
+            execution_mode="paper",
+            db_path=str(db_path),
+            fetch_moneyline_for_game=lambda a, h, d: ml,
+            log_signal=mock_log_signal,
+            place_limit_buy=mock_place,
+            update_order_status=mock_update_order,
+        )
+
+        # skipped ではなく executed or dca_active
+        assert result.status != "skipped", (
+            f"MERGE-only path should not skip, got: {result.status}"
+        )
+
+        # log_signal が呼ばれている
+        mock_log_signal.assert_called_once()
+        call_kwargs = mock_log_signal.call_args[1]
+
+        # 校正域外のメタデータ
+        assert call_kwargs["band_confidence"] == "none"
+        assert call_kwargs["edge_pct"] == 0.0
+        assert call_kwargs["expected_win_rate"] == 0.0
+        assert call_kwargs["signal_role"] == "hedge"
+
+    @patch("src.scheduler.hedge_executor._compute_hedge_order_price")
+    @patch("src.strategy.calibration_curve.get_default_curve")
+    @patch("src.scheduler.hedge_executor.settings")
+    def test_out_of_range_uses_margin_multiplier_sizing(
+        self,
+        mock_settings,
+        mock_curve_factory,
+        mock_order_price,
+        db_path,
+    ):
+        """MERGE-only path should use _hedge_margin_multiplier for sizing."""
+        mock_settings.bothside_target_combined = 0.97
+        mock_settings.bothside_target_combined_max = 0.998
+        mock_settings.bothside_target_combined_min = 0.94
+        mock_settings.bothside_target_mode = "dynamic"
+        mock_settings.bothside_max_combined_vwap = 0.998
+        mock_settings.bothside_dynamic_estimated_fee_usd = 0.05
+        mock_settings.merge_min_profit_usd = 0.10
+        mock_settings.merge_est_gas_usd = 0.05
+        mock_settings.merge_min_shares_floor = 20.0
+        mock_settings.bothside_hedge_kelly_mult = 0.5
+        mock_settings.dca_max_entries = 3
+        mock_settings.max_position_usd = 100.0
+        mock_settings.capital_risk_pct = 2.0
+        mock_settings.sweet_spot_lo = 0.20
+        mock_settings.sweet_spot_hi = 0.55
+        mock_settings.llm_analysis_enabled = False
+
+        # order_price=0.13, combined=0.855+0.13=0.985, margin=0.015
+        mock_order_price.return_value = (0.14, 0.13)
+
+        mock_curve = MagicMock()
+        mock_curve.estimate.return_value = None
+        mock_curve_factory.return_value = mock_curve
+
+        hedge_job, _ = _create_hedge_job(db_path)
+        ml = _make_moneyline()
+
+        mock_log_signal = MagicMock(return_value=888)
+        mock_place = MagicMock()
+        mock_update_order = MagicMock()
+
+        result = process_hedge_job(
+            job=hedge_job,
+            execution_mode="paper",
+            db_path=str(db_path),
+            fetch_moneyline_for_game=lambda a, h, d: ml,
+            log_signal=mock_log_signal,
+            place_limit_buy=mock_place,
+            update_order_status=mock_update_order,
+        )
+
+        assert result.status != "skipped"
+
+        # kelly_size が MERGE-only sizing を使用していることを確認
+        # dir_total_cost=25.0, margin=1.0-0.985=0.015, mult=max(0.3,0.015*15)=0.3
+        # kelly_usd=min(25.0*0.3, 100.0)=7.5
+        call_kwargs = mock_log_signal.call_args[1]
+        kelly_size = call_kwargs["kelly_size"]
+        assert kelly_size > 0, "Hedge should have positive sizing via margin multiplier"
+
+    @patch("src.scheduler.hedge_executor._compute_hedge_order_price")
+    @patch("src.strategy.calibration_curve.get_default_curve")
+    @patch("src.scheduler.hedge_executor.settings")
+    def test_in_range_negative_ev_still_reaches_merge_only(
+        self,
+        mock_settings,
+        mock_curve_factory,
+        mock_order_price,
+        db_path,
+    ):
+        """price in range but EV <= 0 → MERGE-only path (既存動作の回帰テスト)."""
+        mock_settings.bothside_target_combined = 0.97
+        mock_settings.bothside_target_combined_max = 0.998
+        mock_settings.bothside_target_combined_min = 0.94
+        mock_settings.bothside_target_mode = "dynamic"
+        mock_settings.bothside_max_combined_vwap = 0.998
+        mock_settings.bothside_dynamic_estimated_fee_usd = 0.05
+        mock_settings.merge_min_profit_usd = 0.10
+        mock_settings.merge_est_gas_usd = 0.05
+        mock_settings.merge_min_shares_floor = 20.0
+        mock_settings.bothside_hedge_kelly_mult = 0.5
+        mock_settings.dca_max_entries = 3
+        mock_settings.max_position_usd = 100.0
+        mock_settings.capital_risk_pct = 2.0
+        mock_settings.sweet_spot_lo = 0.20
+        mock_settings.sweet_spot_hi = 0.55
+        mock_settings.llm_analysis_enabled = False
+
+        # hedge price=0.45, order_price=0.44
+        mock_order_price.return_value = (0.45, 0.44)
+
+        # カーブ推定あり、ただし lower_bound < order_price → EV <= 0
+        mock_est = MagicMock()
+        mock_est.lower_bound = 0.40  # < 0.44 → negative EV
+        mock_est.effective_sample_size = 50
+        mock_curve = MagicMock()
+        mock_curve.estimate.return_value = mock_est
+        mock_curve_factory.return_value = mock_curve
+
+        # dir_price=0.50 なので combined=0.50+0.44=0.94 < 0.998
+        hedge_job, _ = _create_hedge_job(db_path, dir_price=0.50)
+        ml = _make_moneyline(prices=(0.50, 0.45), token_ids=("tok_knicks", "tok_celtics"))
+
+        mock_log_signal = MagicMock(return_value=777)
+
+        result = process_hedge_job(
+            job=hedge_job,
+            execution_mode="paper",
+            db_path=str(db_path),
+            fetch_moneyline_for_game=lambda a, h, d: ml,
+            log_signal=mock_log_signal,
+            place_limit_buy=MagicMock(),
+            update_order_status=MagicMock(),
+        )
+
+        assert result.status != "skipped"
+        call_kwargs = mock_log_signal.call_args[1]
+        # est が存在するので band_confidence は "none" ではない
+        assert call_kwargs["band_confidence"] != "none"
+        assert call_kwargs["expected_win_rate"] == 0.40

@@ -5,6 +5,7 @@ All functions are stateless (no I/O) — callers handle file loading and saving.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import datetime, timezone
 
 # ---------------------------------------------------------------------------
@@ -165,6 +166,7 @@ def _make_empty_condition(
         "trade_count": 0,
         "first_trade_ts": first_ts,
         "last_trade_ts": last_ts,
+        "settlement_ts": 0,
         "redeem_usdc": 0.0,
         "redeem_shares": 0.0,
         "merge_usdc": 0.0,
@@ -218,9 +220,11 @@ def build_condition_pnl(
     # REDEEM
     for r in redeems:
         cid = r.get("conditionId", "")
+        r_ts = r.get("timestamp", 0)
         if cid in conditions:
             conditions[cid]["redeem_usdc"] += float(r.get("usdcSize", 0))
             conditions[cid]["redeem_shares"] += float(r.get("size", 0))
+            conditions[cid]["settlement_ts"] = max(conditions[cid]["settlement_ts"], r_ts)
         else:
             conditions[cid] = _make_empty_condition(
                 cid,
@@ -232,13 +236,16 @@ def build_condition_pnl(
             )
             conditions[cid]["redeem_usdc"] = float(r.get("usdcSize", 0))
             conditions[cid]["redeem_shares"] = float(r.get("size", 0))
+            conditions[cid]["settlement_ts"] = r_ts
 
     # MERGE
     for m in merges:
         cid = m.get("conditionId", "")
+        m_ts = m.get("timestamp", 0)
         if cid in conditions:
             conditions[cid]["merge_usdc"] += float(m.get("usdcSize", 0))
             conditions[cid]["merge_shares"] += float(m.get("size", 0))
+            conditions[cid]["settlement_ts"] = max(conditions[cid]["settlement_ts"], m_ts)
 
     # P&L
     for cid, c in conditions.items():
@@ -256,6 +263,14 @@ def build_condition_pnl(
             c["status"] = "LOSS_OR_OPEN"
         else:
             c["status"] = "UNKNOWN"
+
+        # 保有期間 (hours)
+        end_ts = c["settlement_ts"] if c["settlement_ts"] > 0 else c["last_trade_ts"]
+        first_ts = c["first_trade_ts"]
+        if first_ts < float("inf") and end_ts > 0 and end_ts >= first_ts:
+            c["holding_hours"] = (end_ts - first_ts) / 3600.0
+        else:
+            c["holding_hours"] = 0.0
 
         # データ品質判定: BUY データ欠落の検知
         if c["buy_cost"] == 0 and c["total_payout"] > 0 and c["trade_count"] == 0:
@@ -348,6 +363,72 @@ def aggregate_by_game(conditions: dict[str, dict]) -> list[dict]:
 
     result.sort(key=lambda x: x["date"])
     return result
+
+
+# ---------------------------------------------------------------------------
+# Data quality detection
+# ---------------------------------------------------------------------------
+@dataclass(frozen=True)
+class DataQualityReport:
+    """Summary of data quality issues for a trader's condition set."""
+
+    total_conditions: int
+    missing_trade_conditions: int
+    phantom_pnl: float
+    activity_gaps_days: list[int]  # gaps > 30 days between consecutive conditions
+    quality_score: str  # "complete" / "incomplete" / "suspect"
+
+
+def detect_data_quality_issues(conditions: dict[str, dict]) -> DataQualityReport:
+    """Detect data quality issues from condition-level P&L data.
+
+    Args:
+        conditions: Output of build_condition_pnl().
+
+    Returns:
+        DataQualityReport summarising issues found.
+    """
+    if not conditions:
+        return DataQualityReport(
+            total_conditions=0,
+            missing_trade_conditions=0,
+            phantom_pnl=0.0,
+            activity_gaps_days=[],
+            quality_score="complete",
+        )
+
+    missing = [c for c in conditions.values() if c.get("data_quality") == "missing_trades"]
+    missing_count = len(missing)
+    phantom_pnl = sum(c["pnl"] for c in missing)
+
+    # Activity gaps: sort conditions by first_trade_ts, find >30-day gaps
+    valid_ts = sorted(
+        c["first_trade_ts"]
+        for c in conditions.values()
+        if c["first_trade_ts"] < float("inf") and c["first_trade_ts"] > 0
+    )
+    gaps: list[int] = []
+    for i in range(1, len(valid_ts)):
+        gap_days = int((valid_ts[i] - valid_ts[i - 1]) / 86400)
+        if gap_days > 30:
+            gaps.append(gap_days)
+
+    # Quality score
+    total = len(conditions)
+    if missing_count == 0 and not gaps:
+        quality = "complete"
+    elif missing_count > total * 0.1 or phantom_pnl > 1000:
+        quality = "suspect"
+    else:
+        quality = "incomplete"
+
+    return DataQualityReport(
+        total_conditions=total,
+        missing_trade_conditions=missing_count,
+        phantom_pnl=round(phantom_pnl, 2),
+        activity_gaps_days=gaps,
+        quality_score=quality,
+    )
 
 
 # Re-export generate_report for backward compatibility

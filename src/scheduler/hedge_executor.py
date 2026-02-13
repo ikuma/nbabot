@@ -300,25 +300,26 @@ def process_hedge_job(
         _curve = get_default_curve()
         est = _curve.estimate(order_price)
         if est is None:
-            _defer_or_skip_hedge_job(
-                job_id=job.id,
-                execution_mode=execution_mode,
-                reason="No calibration band for hedge",
-                db_path=db_path,
-            )
-            return JobResult(job.id, job.event_slug, "skipped")
-
-        ev = _ev_per_dollar(est.lower_bound, order_price)
-        if ev <= 0:
+            # 校正カーブ域外 (price < 0.20) — MERGE-only パスで続行
             logger.info(
-                "Hedge job %d: EV non-positive (%.3f) — proceeding for MERGE (combined=%.4f)",
+                "Hedge job %d: no calibration estimate @ %.3f — MERGE-only path",
                 job.id,
-                ev,
-                combined,
+                order_price,
             )
+            ev = 0.0
+            kelly = 0.0
+        else:
+            ev = _ev_per_dollar(est.lower_bound, order_price)
+            if ev <= 0:
+                logger.info(
+                    "Hedge job %d: EV non-positive (%.3f) — proceeding for MERGE (combined=%.4f)",
+                    job.id,
+                    ev,
+                    combined,
+                )
+            kelly = _calibration_kelly(est.lower_bound, order_price)
 
         # サイジング: 正 EV → Kelly ベース、非正 EV → MERGE-only (cost-based)
-        kelly = _calibration_kelly(est.lower_bound, order_price)
         if kelly > 0:
             # 正 EV パス: Kelly ベース (既存)
             from src.strategy.hedge_ratio_runtime import resolve_hedge_kelly_mult
@@ -386,8 +387,8 @@ def process_hedge_job(
         sweet = is_in_sweet_spot(order_price, settings.sweet_spot_lo, settings.sweet_spot_hi)
         _band = lookup_band(order_price)
         band_label = f"{_band.price_lo:.2f}-{_band.price_hi:.2f}" if _band else f"{order_price:.2f}"
-        band_confidence = _confidence_from_sample_size(est.effective_sample_size)
-        edge_pct = (est.lower_bound - order_price) * 100
+        band_confidence = _confidence_from_sample_size(est.effective_sample_size) if est else "none"
+        edge_pct = (est.lower_bound - order_price) * 100 if est else 0.0
 
         signal_id = log_signal(
             game_title=ml.event_title,
@@ -401,7 +402,7 @@ def process_hedge_job(
             token_id=hedge_token_id,
             market_type="moneyline",
             calibration_edge_pct=edge_pct,
-            expected_win_rate=est.lower_bound,
+            expected_win_rate=est.lower_bound if est else 0.0,
             price_band=band_label,
             in_sweet_spot=sweet,
             band_confidence=band_confidence,

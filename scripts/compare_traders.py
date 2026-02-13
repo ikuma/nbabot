@@ -260,9 +260,30 @@ def generate_comparison_report(profiles: list[dict], sort_by: str) -> str:
         )
     out.append("")
 
-    # --- 7. Execution Style ---
+    # --- 7. MERGE Profile ---
     out.append("---")
-    out.append("## 7. Execution Style")
+    out.append("## 7. MERGE Profile")
+    out.append("")
+    out.append("| Trader | MERGE Count | Recovery $ | MERGE P&L | Recovery % | Avg Profit |")
+    out.append("|--------|-------------|------------|-----------|------------|------------|")
+    for p in profiles:
+        name = p.get("username", "?")[:15]
+        mc = p.get("merge_count", 0)
+        if mc == 0:
+            out.append(f"| {name} | 0 | - | - | - | - |")
+            continue
+        mr_usd = p.get("merge_recovery_usd", 0)
+        mp = p.get("merge_pnl", 0)
+        mr_pct = p.get("merge_recovery_pct", 0)
+        avg_p = p.get("avg_merge_profit", 0)
+        out.append(
+            f"| {name} | {mc:,} | ${mr_usd:,.0f} | ${mp:,.0f} | {mr_pct:.1f}% | ${avg_p:,.2f} |"
+        )
+    out.append("")
+
+    # --- 8. Execution Style ---
+    out.append("---")
+    out.append("## 8. Execution Style")
     out.append("")
     out.append(
         "| Trader | DCA% | Avg Trades/Cond | Avg Position | Median Position | Sweet Spot % |"

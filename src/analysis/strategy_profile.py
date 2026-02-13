@@ -82,6 +82,20 @@ class StrategyProfile:
     avg_position_size: float = 0.0
     median_position_size: float = 0.0
 
+    # MERGE プロファイル
+    merge_count: int = 0
+    merge_recovery_usd: float = 0.0
+    merge_pnl: float = 0.0
+    merge_recovery_pct: float = 0.0
+    avg_merge_profit: float = 0.0
+
+    # マーケットタイプ別統計
+    market_type_stats: dict[str, dict] = field(default_factory=dict)
+
+    # 保有期間
+    avg_holding_hours: float = 0.0
+    median_holding_hours: float = 0.0
+
     # リスク管理
     daily_sharpe: float = 0.0
     weekly_sharpe: float = 0.0
@@ -123,6 +137,14 @@ class StrategyProfile:
             "avg_trades_per_condition": round(self.avg_trades_per_condition, 2),
             "avg_position_size": round(self.avg_position_size, 2),
             "median_position_size": round(self.median_position_size, 2),
+            "merge_count": self.merge_count,
+            "merge_recovery_usd": round(self.merge_recovery_usd, 2),
+            "merge_pnl": round(self.merge_pnl, 2),
+            "merge_recovery_pct": round(self.merge_recovery_pct, 2),
+            "avg_merge_profit": round(self.avg_merge_profit, 2),
+            "market_type_stats": self.market_type_stats,
+            "avg_holding_hours": round(self.avg_holding_hours, 2),
+            "median_holding_hours": round(self.median_holding_hours, 2),
             "daily_sharpe": round(self.daily_sharpe, 3),
             "weekly_sharpe": round(self.weekly_sharpe, 3),
             "max_drawdown_pct": round(self.max_drawdown_pct, 2),
@@ -235,10 +257,34 @@ def build_profile(
     losses = sum(1 for c in conditions.values() if c["status"] == "LOSS_OR_OPEN")
     profile.win_rate = wins / (wins + losses) if (wins + losses) > 0 else 0.0
 
+    # --- MERGE プロファイル ---
+    merged_conds = [c for c in conditions.values() if c.get("merge_usdc", 0) > 0]
+    if merged_conds:
+        profile.merge_count = len(merged_conds)
+        profile.merge_recovery_usd = sum(c["merge_usdc"] for c in merged_conds)
+        merge_cost = sum(c["net_cost"] for c in merged_conds)
+        profile.merge_pnl = profile.merge_recovery_usd - merge_cost
+        profile.merge_recovery_pct = (
+            profile.merge_recovery_usd / merge_cost * 100 if merge_cost > 0 else 0.0
+        )
+        profile.avg_merge_profit = profile.merge_pnl / profile.merge_count
+
+    # --- 保有期間 ---
+    holding_hours_list = [
+        c["holding_hours"] for c in conditions.values() if c.get("holding_hours", 0) > 0
+    ]
+    if holding_hours_list:
+        profile.avg_holding_hours = mean(holding_hours_list)
+        profile.median_holding_hours = median(holding_hours_list)
+
     # --- カテゴリ / スポーツ / マーケットタイプ ---
     cat_pnl: dict[str, float] = defaultdict(float)
     sport_pnl: dict[str, float] = defaultdict(float)
     mt_pnl: dict[str, float] = defaultdict(float)
+    # マーケットタイプ別統計 (win_rate 含む)
+    mt_stats: dict[str, dict] = defaultdict(
+        lambda: {"count": 0, "wins": 0, "losses": 0, "volume": 0.0, "pnl": 0.0}
+    )
 
     for c in conditions.values():
         cat = c.get("category", classify_category(c.get("slug", ""), c.get("title", "")))
@@ -248,10 +294,26 @@ def build_profile(
             sport_pnl[sport] += c["pnl"]
         mt = c.get("market_type", classify_market_type(c.get("slug", "")))
         mt_pnl[mt] += c["pnl"]
+        mt_s = mt_stats[mt]
+        mt_s["count"] += 1
+        mt_s["volume"] += c.get("net_cost", 0)
+        mt_s["pnl"] += c["pnl"]
+        if c["status"] == "WIN":
+            mt_s["wins"] += 1
+        elif c["status"] == "LOSS_OR_OPEN":
+            mt_s["losses"] += 1
+
+    # win_rate を算出
+    for mt_s in mt_stats.values():
+        wl = mt_s["wins"] + mt_s["losses"]
+        mt_s["win_rate"] = round(mt_s["wins"] / wl, 4) if wl > 0 else 0.0
+        mt_s["volume"] = round(mt_s["volume"], 2)
+        mt_s["pnl"] = round(mt_s["pnl"], 2)
 
     profile.category_pnl = dict(cat_pnl)
     profile.sport_pnl = dict(sport_pnl)
     profile.market_type_pnl = dict(mt_pnl)
+    profile.market_type_stats = dict(mt_stats)
     profile.primary_category = max(cat_pnl, key=lambda k: abs(cat_pnl[k])) if cat_pnl else "Other"
 
     # --- 校正曲線 (5¢ 刻み) ---

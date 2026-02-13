@@ -203,6 +203,105 @@ def compute_capital_turnover_metrics(
     )
 
 
+@dataclass(frozen=True)
+class MergeProfileMetrics:
+    """MERGE profiling metrics computed from condition dicts."""
+
+    merge_count: int
+    merge_recovery_usd: float
+    merge_pnl: float
+    merge_recovery_pct: float
+    avg_merge_profit: float
+
+
+def compute_decomposed_from_conditions(
+    conditions: dict[str, dict],
+) -> DecomposedMetrics:
+    """Compute 3 decomposed metrics from condition dicts (DB-free).
+
+    Args:
+        conditions: Output of build_condition_pnl(). Keys are conditionIds.
+
+    Returns:
+        DecomposedMetrics with game_correct, trade_profit, and merge rates.
+    """
+    if not conditions:
+        return DecomposedMetrics(
+            game_correct_rate=0.0,
+            game_correct_count=0,
+            game_incorrect_count=0,
+            trade_profit_rate=0.0,
+            trade_profitable_count=0,
+            trade_unprofitable_count=0,
+            merge_rate=0.0,
+            merge_settled_count=0,
+            total_settled=0,
+        )
+
+    conds = list(conditions.values())
+    # Game correct: WIN status (MERGED excluded — no game outcome)
+    game_correct = sum(1 for c in conds if c["status"] == "WIN")
+    game_incorrect = sum(1 for c in conds if c["status"] == "LOSS_OR_OPEN")
+    game_total = game_correct + game_incorrect
+
+    # Trade profitable: P&L > 0
+    total_settled = sum(1 for c in conds if c["status"] in ("WIN", "LOSS_OR_OPEN", "MERGED"))
+    trade_profitable = sum(1 for c in conds if c["pnl"] > 0)
+    trade_unprofitable = total_settled - trade_profitable
+
+    # Merge rate: conditions settled via MERGE
+    merge_settled = sum(1 for c in conds if c["merge_usdc"] > 0)
+
+    return DecomposedMetrics(
+        game_correct_rate=game_correct / game_total if game_total > 0 else 0.0,
+        game_correct_count=game_correct,
+        game_incorrect_count=game_incorrect,
+        trade_profit_rate=trade_profitable / total_settled if total_settled > 0 else 0.0,
+        trade_profitable_count=trade_profitable,
+        trade_unprofitable_count=trade_unprofitable,
+        merge_rate=merge_settled / total_settled if total_settled > 0 else 0.0,
+        merge_settled_count=merge_settled,
+        total_settled=total_settled,
+    )
+
+
+def compute_merge_metrics(
+    conditions: dict[str, dict],
+) -> MergeProfileMetrics:
+    """Compute MERGE profiling metrics from condition dicts (DB-free).
+
+    Args:
+        conditions: Output of build_condition_pnl(). Keys are conditionIds.
+
+    Returns:
+        MergeProfileMetrics with merge count, recovery, and PnL.
+    """
+    merged = [c for c in conditions.values() if c.get("merge_usdc", 0) > 0]
+    if not merged:
+        return MergeProfileMetrics(
+            merge_count=0,
+            merge_recovery_usd=0.0,
+            merge_pnl=0.0,
+            merge_recovery_pct=0.0,
+            avg_merge_profit=0.0,
+        )
+
+    merge_count = len(merged)
+    merge_recovery = sum(c["merge_usdc"] for c in merged)
+    merge_cost = sum(c["net_cost"] for c in merged)
+    merge_pnl = merge_recovery - merge_cost
+    merge_recovery_pct = merge_recovery / merge_cost * 100 if merge_cost > 0 else 0.0
+    avg_profit = merge_pnl / merge_count
+
+    return MergeProfileMetrics(
+        merge_count=merge_count,
+        merge_recovery_usd=round(merge_recovery, 2),
+        merge_pnl=round(merge_pnl, 2),
+        merge_recovery_pct=round(merge_recovery_pct, 2),
+        avg_merge_profit=round(avg_profit, 2),
+    )
+
+
 def format_decomposed_summary(m: DecomposedMetrics) -> str:
     """Format decomposed metrics for Telegram / log summary."""
     return (

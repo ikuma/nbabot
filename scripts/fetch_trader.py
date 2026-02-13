@@ -37,6 +37,9 @@ HEADERS = {
 
 ACTIVITY_TYPES = ["TRADE", "REDEEM", "MERGE", "REWARD"]
 
+MAX_RETRIES = 3
+RETRY_BASE_SEC = 2.0
+
 
 def fetch_page(
     address: str,
@@ -45,7 +48,7 @@ def fetch_page(
     end_ts: Optional[int] = None,
     start_ts: Optional[int] = None,
 ) -> list[dict]:
-    """Fetch one page of activity."""
+    """Fetch one page of activity with exponential backoff retry."""
     params: dict[str, str | int] = {
         "user": address,
         "limit": LIMIT,
@@ -58,14 +61,45 @@ def fetch_page(
         params["start"] = start_ts
     qs = urllib.parse.urlencode(params)
     url = f"{BASE_URL}?{qs}"
-    try:
-        req = urllib.request.Request(url, headers=HEADERS)
-        with urllib.request.urlopen(req, timeout=45) as resp:
-            data = json.loads(resp.read().decode())
-            return data if isinstance(data, list) else []
-    except Exception as e:
-        print(f"  Error type={activity_type} offset={offset}: {e}", file=sys.stderr)
-        return []
+
+    for attempt in range(MAX_RETRIES):
+        try:
+            req = urllib.request.Request(url, headers=HEADERS)
+            with urllib.request.urlopen(req, timeout=45) as resp:
+                data = json.loads(resp.read().decode())
+                return data if isinstance(data, list) else []
+        except Exception as e:
+            wait = RETRY_BASE_SEC * (2**attempt)
+            if attempt < MAX_RETRIES - 1:
+                print(
+                    f"  Retry {attempt + 1}/{MAX_RETRIES} type={activity_type} "
+                    f"offset={offset}: {e} (wait {wait:.0f}s)",
+                    file=sys.stderr,
+                )
+                time.sleep(wait)
+            else:
+                print(
+                    f"  Failed after {MAX_RETRIES} retries type={activity_type} "
+                    f"offset={offset}: {e}",
+                    file=sys.stderr,
+                )
+    return []
+
+
+def _dedup_key(r: dict) -> tuple[int, str, str, str, str, str]:
+    """Build a robust dedup key for an activity record.
+
+    Uses normalized size string to avoid float precision issues,
+    and includes outcome+side to distinguish records with empty txHash.
+    """
+    return (
+        r.get("timestamp", 0),
+        r.get("transactionHash", ""),
+        r.get("conditionId", r.get("asset", "")),
+        f"{float(r.get('size', 0)):.6f}",
+        r.get("outcome", ""),
+        r.get("side", ""),
+    )
 
 
 def fetch_all_for_type(
@@ -126,15 +160,10 @@ def fetch_all_for_type(
             break
 
     # Dedupe
-    seen: set[tuple[int, str, str, float]] = set()
+    seen: set[tuple] = set()
     unique: list[dict] = []
     for r in all_records:
-        key = (
-            r["timestamp"],
-            r.get("transactionHash", ""),
-            r.get("conditionId", r.get("asset", "")),
-            float(r.get("size", 0)),
-        )
+        key = _dedup_key(r)
         if key not in seen:
             seen.add(key)
             unique.append(r)
@@ -207,15 +236,10 @@ def save_fetch_state(trader_dir: Path, state: dict) -> None:
 
 def merge_records(existing: list[dict], new: list[dict]) -> list[dict]:
     """Merge new records into existing, deduplicating."""
-    seen: set[tuple[int, str, str, float]] = set()
+    seen: set[tuple] = set()
     result: list[dict] = []
     for r in existing + new:
-        key = (
-            r["timestamp"],
-            r.get("transactionHash", ""),
-            r.get("conditionId", r.get("asset", "")),
-            float(r.get("size", 0)),
-        )
+        key = _dedup_key(r)
         if key not in seen:
             seen.add(key)
             result.append(r)

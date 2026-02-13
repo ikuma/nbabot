@@ -18,11 +18,11 @@ if TYPE_CHECKING:
 class ExpectationGap:
     """Monthly/weekly gap between expected and realized P&L."""
 
-    period: str           # YYYY-MM or YYYY-Www
-    expected_pnl: float   # sum(ev_per_dollar * kelly_size)
-    realized_pnl: float   # sum(actual pnl)
-    gap_usd: float        # realized - expected
-    gap_pct: float        # gap / |expected| * 100
+    period: str  # YYYY-MM or YYYY-Www
+    expected_pnl: float  # sum(ev_per_dollar * kelly_size)
+    realized_pnl: float  # sum(actual pnl)
+    gap_usd: float  # realized - expected
+    gap_pct: float  # gap / |expected| * 100
     n_signals: int
 
 
@@ -43,9 +43,7 @@ def compute_expectation_gaps(
     Returns:
         List of ExpectationGap sorted by period.
     """
-    buckets: dict[str, dict] = defaultdict(
-        lambda: {"expected": 0.0, "realized": 0.0, "count": 0}
-    )
+    buckets: dict[str, dict] = defaultdict(lambda: {"expected": 0.0, "realized": 0.0, "count": 0})
 
     for result, signal in results_with_signals:
         # Derive expected EV from calibration fields
@@ -66,6 +64,7 @@ def compute_expectation_gaps(
         settled_date = result.settled_at[:10]  # YYYY-MM-DD
         if period == "weekly":
             from datetime import datetime
+
             try:
                 dt = datetime.strptime(settled_date, "%Y-%m-%d")
                 key = dt.strftime("%Y-W%W")
@@ -84,14 +83,16 @@ def compute_expectation_gaps(
         gap = b["realized"] - b["expected"]
         gap_pct = gap / abs(b["expected"]) * 100 if b["expected"] != 0 else 0.0
 
-        gaps.append(ExpectationGap(
-            period=key,
-            expected_pnl=round(b["expected"], 2),
-            realized_pnl=round(b["realized"], 2),
-            gap_usd=round(gap, 2),
-            gap_pct=round(gap_pct, 1),
-            n_signals=b["count"],
-        ))
+        gaps.append(
+            ExpectationGap(
+                period=key,
+                expected_pnl=round(b["expected"], 2),
+                realized_pnl=round(b["realized"], 2),
+                gap_usd=round(gap, 2),
+                gap_pct=round(gap_pct, 1),
+                n_signals=b["count"],
+            )
+        )
 
     return gaps
 
@@ -107,12 +108,8 @@ def format_expectation_report(gaps: list[ExpectationGap]) -> list[str]:
     out: list[str] = []
     out.append("### Expected vs Realized PnL")
     out.append("")
-    out.append(
-        "| Period | Signals | Expected | Realized | Gap ($) | Gap (%) |"
-    )
-    out.append(
-        "|--------|---------|----------|----------|---------|---------|"
-    )
+    out.append("| Period | Signals | Expected | Realized | Gap ($) | Gap (%) |")
+    out.append("|--------|---------|----------|----------|---------|---------|")
     for g in gaps:
         out.append(
             f"| {g.period} | {g.n_signals} | ${g.expected_pnl:,.2f} "
@@ -124,10 +121,10 @@ def format_expectation_report(gaps: list[ExpectationGap]) -> list[str]:
     if len(gaps) >= 3:
         recent = gaps[-3:]
         # gap_pct が連続で悪化 (より負に) しているか
-        if all(
-            recent[i].gap_pct < recent[i - 1].gap_pct
-            for i in range(1, len(recent))
-        ) and recent[-1].gap_pct < -10:
+        if (
+            all(recent[i].gap_pct < recent[i - 1].gap_pct for i in range(1, len(recent)))
+            and recent[-1].gap_pct < -10
+        ):
             out.append(
                 "> **WARNING**: Edge may be decaying — "
                 f"gap has widened for {len(recent)} consecutive periods "
