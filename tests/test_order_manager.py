@@ -139,21 +139,35 @@ class TestOrderLifecycleDB:
         assert active[0].id == sig_id
         assert active[0].order_id == "order_123"
 
-    def test_get_active_placed_orders_excludes_expired_jobs(self, db_path: Path):
-        """Orders for jobs past execute_before should not be returned."""
+    @patch("src.connectors.polymarket.cancel_order", return_value=True)
+    @patch("src.connectors.polymarket.get_order_status", return_value={"status": "open"})
+    def test_get_active_placed_orders_includes_past_tipoff_and_expires(
+        self,
+        _mock_status,
+        _mock_cancel,
+        db_path: Path,
+    ):
+        """Past-tipoff orders should be picked up and expired by order manager."""
         slug = "nba-nyk-bos-2026-02-14"
         now = datetime.now(timezone.utc)
         _make_trade_job(
             db_path,
             event_slug=slug,
             game_date="2026-02-14",
+            game_time_utc=(now - timedelta(hours=1)).isoformat(),
             execute_before=(now - timedelta(hours=1)).isoformat(),
         )
         sig_id = _make_signal(db_path, event_slug=slug)
         update_order_status(sig_id, "order_old", "placed", db_path=db_path)
 
         active = get_active_placed_orders(db_path=db_path)
-        assert len(active) == 0
+        assert len(active) == 1
+        assert active[0].id == sig_id
+
+        from src.scheduler.order_manager import check_single_order
+
+        result = check_single_order(active[0], str(db_path))
+        assert result.action == "expired"
 
 
 class TestCheckSingleOrder:

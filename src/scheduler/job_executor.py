@@ -166,6 +166,104 @@ def _apply_llm_directional_override(
     return opp, bothside_opp
 
 
+def _estimate_fill_probability(liquidity_snapshot) -> float:
+    """Estimate fill probability from spread/liquidity snapshot."""
+    if liquidity_snapshot is None:
+        return 0.65
+    spread_pct = getattr(liquidity_snapshot, "spread_pct", None)
+    if spread_pct is None:
+        return 0.75
+    denom = max(settings.max_spread_pct, 1e-6)
+    fill_prob = 1.0 - (float(spread_pct) / denom)
+    return max(0.2, min(0.98, fill_prob))
+
+
+def _estimate_slippage_cost(liquidity_snapshot, price: float) -> float:
+    """Estimate slippage cost in price units for utility ranking."""
+    spread_pct = getattr(liquidity_snapshot, "spread_pct", None) if liquidity_snapshot else None
+    if spread_pct is None:
+        return max(price * 0.005, 0.001)
+    return max(price * (float(spread_pct) / 100.0) * 0.5, 0.0)
+
+
+def _compute_leg_utility(
+    primary,
+    opposite,
+    liquidity_map,
+) -> float:
+    """Compute side utility for first-leg selection.
+
+    utility = fill_prob * (merge_improve + alpha_improve) - slippage - inventory_penalty
+    """
+    liquidity = liquidity_map.get(primary.token_id) if liquidity_map else None
+    fill_prob = _estimate_fill_probability(liquidity)
+    slippage = _estimate_slippage_cost(liquidity, primary.poly_price)
+    merge_improve = 1.0 - (primary.poly_price + opposite.poly_price)
+    alpha_improve = primary.ev_per_dollar
+    inventory_penalty = 0.0
+    return (
+        fill_prob
+        * (
+            settings.position_group_utility_merge_weight * merge_improve
+            + settings.position_group_utility_alpha_weight * alpha_improve
+        )
+        - settings.position_group_utility_slippage_weight * slippage
+        - inventory_penalty
+    )
+
+
+def _apply_utility_leg_order(
+    *,
+    bothside_opp,
+    liquidity_map,
+    effective_hedge_mult: float,
+):
+    """Optionally reorder first leg by utility (Track B4)."""
+    if not settings.game_position_group_enabled:
+        return bothside_opp.directional, bothside_opp
+    if not settings.position_group_utility_enabled:
+        return bothside_opp.directional, bothside_opp
+    if not bothside_opp.hedge:
+        return bothside_opp.directional, bothside_opp
+
+    from src.strategy.calibration_scanner import BothsideOpportunity
+
+    dir_u = _compute_leg_utility(
+        primary=bothside_opp.directional,
+        opposite=bothside_opp.hedge,
+        liquidity_map=liquidity_map,
+    )
+    hedge_u = _compute_leg_utility(
+        primary=bothside_opp.hedge,
+        opposite=bothside_opp.directional,
+        liquidity_map=liquidity_map,
+    )
+
+    if hedge_u <= dir_u:
+        logger.info(
+            "Utility leg order keep: first=%s u_dir=%.4f u_opp=%.4f",
+            bothside_opp.directional.outcome_name,
+            dir_u,
+            hedge_u,
+        )
+        return bothside_opp.directional, bothside_opp
+
+    swapped = BothsideOpportunity(
+        directional=bothside_opp.hedge,
+        hedge=bothside_opp.directional,
+        combined_price=bothside_opp.combined_price,
+        hedge_position_usd=bothside_opp.directional.position_usd * effective_hedge_mult,
+    )
+    logger.info(
+        "Utility leg order swap: %s -> %s (u_dir=%.4f u_opp=%.4f)",
+        bothside_opp.directional.outcome_name,
+        swapped.directional.outcome_name,
+        dir_u,
+        hedge_u,
+    )
+    return swapped.directional, swapped
+
+
 def process_single_job(
     job: TradeJob,
     execution_mode: str,
@@ -291,6 +389,14 @@ def process_single_job(
                     balance_usd=balance_usd,
                     effective_hedge_mult=effective_hedge_mult,
                 )
+
+            # Track B4: utility(side) による先行脚選択
+            if bothside_opp and opp and bothside_opp.hedge:
+                opp, bothside_opp = _apply_utility_leg_order(
+                    bothside_opp=bothside_opp,
+                    liquidity_map=liquidity_map,
+                    effective_hedge_mult=effective_hedge_mult,
+                )
         else:
             opps = scan_calibration([ml], balance_usd=balance_usd, liquidity_map=liquidity_map)
             opp = opps[0] if opps else None
@@ -360,6 +466,16 @@ def process_single_job(
         _ask_depth = _liq_snap.ask_depth_5c if _liq_snap else None
         _spread = _liq_snap.spread_pct if _liq_snap else None
 
+        if execution_mode == "live" and not _preflight_check():
+            update_job_status(
+                job.id,
+                "failed",
+                error_message="Preflight check failed",
+                increment_retry=True,
+                db_path=db_path,
+            )
+            return JobResult(job.id, job.event_slug, "failed", error="preflight failed"), None
+
         # DCA グループ ID を生成 (初回エントリー)
         dca_group_id = str(uuid.uuid4())
 
@@ -394,20 +510,6 @@ def process_single_job(
         )
 
         if execution_mode == "live":
-            if not _preflight_check():
-                update_job_status(
-                    job.id,
-                    "failed",
-                    signal_id=signal_id,
-                    error_message="Preflight check failed",
-                    increment_retry=True,
-                    db_path=db_path,
-                )
-                return (
-                    JobResult(job.id, job.event_slug, "failed", signal_id, "preflight failed"),
-                    None,
-                )
-
             size_usd = budget.slice_size_usd
             order_price = opp.poly_price
             if _liq_snap and _liq_snap.best_ask > 0:

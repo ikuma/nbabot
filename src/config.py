@@ -164,5 +164,21 @@ class Settings(BaseSettings):
     merge_polygon_rpc: str = "https://polygon-rpc.com"
     merge_safe_outer_gas_limit: int = 400_000  # Safe execTransaction の外側 gas limit
 
+    # === Game Position Group state machine (Track B) ===
+    game_position_group_enabled: bool = False  # Track B rollout flag
+    position_group_default_d_max: float = 50.0  # Default max directional residual (shares)
+    position_group_min_merge_shares: float = 5.0  # m >= threshold to enter MERGE_LOOP
+    position_group_new_risk_cutoff_min: int = 30  # before tipoff, stop increasing risk
+    position_group_utility_enabled: bool = True  # choose first leg by utility when Track B enabled
+    position_group_utility_alpha_weight: float = 1.0
+    position_group_utility_merge_weight: float = 1.0
+    position_group_utility_slippage_weight: float = 1.0
+    position_group_dmax_decay_enabled: bool = True  # D_max(t) decay near tipoff
+    position_group_dmax_decay_start_min: int = 180  # decay starts N minutes before tipoff
+    position_group_dmax_decay_floor_ratio: float = 0.3  # D_max floor as ratio of base
+    position_group_leg2_timeout_min: int = 90  # timeout for waiting second leg completion
+    position_group_safe_stop_flags: str = "balance_anomaly"  # comma-separated risk flags
+    position_group_safe_stop_on_risk_error: bool = True  # fail-closed on risk engine error
+
 
 settings = Settings()

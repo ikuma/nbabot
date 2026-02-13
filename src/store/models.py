@@ -179,3 +179,20 @@ class MergeOperation:
     capital_release_benefit_usd: float | None = None
     additional_fee_usd: float | None = None
     execution_stage: str = "post_dca"
+
+
+@dataclass
+class PositionGroupRecord:
+    id: int
+    event_slug: str
+    game_date: str
+    state: str
+    M_target: float
+    D_target: float
+    q_dir: float
+    q_opp: float
+    merged_qty: float
+    d_max: float
+    phase_time: str | None
+    created_at: str
+    updated_at: str

@@ -13,12 +13,37 @@ from src.scheduler.job_executor import JobResult
 from src.scheduler.pricing import apply_price_ceiling, below_market_price
 from src.store.db import (
     DEFAULT_DB_PATH,
+    compute_position_group_inventory,
     get_dca_active_jobs,
     get_dca_group_signals,
+    get_position_group,
     update_dca_job,
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _remaining_target_shares_for_job(job, db_path: str) -> float | None:
+    """Return remaining shares to target for this side, or None if not applicable."""
+    if not settings.game_position_group_enabled:
+        return None
+
+    group = get_position_group(job.event_slug, db_path=db_path)
+    if group is None:
+        return None
+
+    # 初期化直後で目標未計算のケースは従来 DCA を継続
+    if group.M_target <= 0 and group.D_target <= 0:
+        return None
+
+    q_dir, q_opp, _ = compute_position_group_inventory(job.event_slug, db_path=db_path)
+    if job.job_side == "hedge":
+        target = max(group.M_target, 0.0)
+        current = q_opp
+    else:
+        target = max(group.M_target + group.D_target, 0.0)
+        current = q_dir
+    return max(target - current, 0.0)
 
 
 def _get_directional_stats(paired_job_id: int | None, db_path: str) -> tuple[float, float]:
@@ -178,7 +203,27 @@ def process_dca_active_jobs(
             logger.warning("No signals found for DCA group %s", job.dca_group_id)
             continue
 
-        first_signal = signals[0]
+        # live 実運用: 約定済み在庫のみを保有として扱う
+        # placed が残っている間は追加DCAを行わない
+        basis_signals = signals
+        if execution_mode == "live":
+            if any(s.order_status == "placed" for s in signals):
+                logger.debug(
+                    "DCA job %d: waiting existing placed order(s) in group %s",
+                    job.id,
+                    job.dca_group_id,
+                )
+                continue
+            basis_signals = [s for s in signals if s.order_status == "filled"]
+            if not basis_signals:
+                logger.debug(
+                    "DCA job %d: no filled inventory yet in group %s",
+                    job.id,
+                    job.dca_group_id,
+                )
+                continue
+
+        first_signal = basis_signals[0]
 
         # 最新価格を取得
         try:
@@ -232,7 +277,7 @@ def process_dca_active_jobs(
 
         # DCA エントリーを構築
         entries = []
-        for sig in signals:
+        for sig in basis_signals:
             try:
                 created = datetime.fromisoformat(sig.created_at.replace("Z", "+00:00"))
             except (ValueError, AttributeError):
@@ -290,11 +335,11 @@ def process_dca_active_jobs(
 
             target_result = calculate_target_order_size(
                 total_budget=total_budget,
-                costs=[s.kelly_size for s in signals],
-                prices=[s.fill_price or s.poly_price for s in signals],
+                costs=[s.kelly_size for s in basis_signals],
+                prices=[s.fill_price or s.poly_price for s in basis_signals],
                 current_price=current_price,
                 max_entries=job.dca_max_entries,
-                entries_done=len(signals),
+                entries_done=len(basis_signals),
                 cap_mult=settings.dca_per_entry_cap_mult,
                 min_order_usd=settings.dca_min_order_usd,
             )
@@ -309,6 +354,28 @@ def process_dca_active_jobs(
         else:
             # dca_total_budget が NULL の旧データ: equal split フォールバック
             dca_size = job.dca_slice_size if job.dca_slice_size else first_signal.kelly_size
+
+        # Track B3: position group target cap (DCA は総目標の分割手段のみ)
+        remaining_target_shares = _remaining_target_shares_for_job(job, path)
+        if remaining_target_shares is not None:
+            remaining_target_usd = remaining_target_shares * current_price
+            if remaining_target_usd < settings.dca_min_order_usd:
+                update_dca_job(job.id, status="executed", db_path=path)
+                logger.info(
+                    "Job %d: target reached/too-small (remain=$%.2f) → executed",
+                    job.id,
+                    remaining_target_usd,
+                )
+                continue
+            if dca_size > remaining_target_usd:
+                logger.info(
+                    "DCA size capped by position target: %.2f -> %.2f (job=%d side=%s)",
+                    dca_size,
+                    remaining_target_usd,
+                    job.id,
+                    job.job_side,
+                )
+                dca_size = remaining_target_usd
 
         if execution_mode == "dry-run":
             logger.info(
@@ -398,7 +465,7 @@ def process_dca_active_jobs(
 
             _old_vwap = decision.vwap
             _stub = type("_S", (), {"kelly_size": dca_size, "poly_price": current_price})
-            _new_signals = signals + [_stub]
+            _new_signals = basis_signals + [_stub]
             _new_vwap = calculate_vwap_from_pairs(
                 [s.kelly_size for s in _new_signals],
                 [getattr(s, "fill_price", None) or s.poly_price for s in _new_signals],

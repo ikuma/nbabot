@@ -24,6 +24,7 @@ from src.store.db import (
     get_job_summary,
     has_signal_for_slug_and_side,
     update_job_status,
+    upsert_position_group,
     upsert_trade_job,
 )
 
@@ -108,6 +109,15 @@ def refresh_schedule(
                 slug,
                 execute_after,
                 execute_before,
+            )
+
+        if settings.game_position_group_enabled:
+            upsert_position_group(
+                event_slug=slug,
+                game_date=game_date,
+                state="PLANNED",
+                d_max=settings.position_group_default_d_max,
+                db_path=path,
             )
 
     summary = get_job_summary(game_date, db_path=path)
@@ -204,7 +214,11 @@ def process_eligible_jobs(
     if recovered:
         logger.info("Recovered %d executing jobs", recovered)
 
-    eligible = get_eligible_jobs(now_utc, db_path=path)
+    eligible = get_eligible_jobs(
+        now_utc,
+        max_retries=settings.schedule_max_retries,
+        db_path=path,
+    )
     if not eligible:
         logger.info("No eligible jobs in execution window")
         return []
@@ -261,6 +275,29 @@ def process_eligible_jobs(
             orders_this_tick += 1
 
     return results
+
+
+def process_position_groups_tick(
+    db_path: str | None = None,
+) -> int:
+    """Advance GamePositionGroup state machine once per scheduler tick."""
+    if not settings.game_position_group_enabled:
+        return 0
+
+    from src.scheduler.position_group_manager import process_position_groups
+
+    path = db_path or str(DEFAULT_DB_PATH)
+    results = process_position_groups(db_path=path)
+    if not results:
+        return 0
+
+    transitions = sum(1 for r in results if r.prev_state != r.new_state)
+    logger.info(
+        "Position groups: processed=%d transitions=%d",
+        len(results),
+        transitions,
+    )
+    return transitions
 
 
 def _partition_tick_results(

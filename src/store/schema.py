@@ -88,6 +88,24 @@ CREATE TABLE IF NOT EXISTS merge_operations (
 );
 """
 
+POSITION_GROUPS_SQL = """
+CREATE TABLE IF NOT EXISTS position_groups (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    event_slug  TEXT NOT NULL UNIQUE,
+    game_date   TEXT NOT NULL,
+    state       TEXT NOT NULL DEFAULT 'PLANNED',
+    M_target    REAL NOT NULL DEFAULT 0.0,
+    D_target    REAL NOT NULL DEFAULT 0.0,
+    q_dir       REAL NOT NULL DEFAULT 0.0,
+    q_opp       REAL NOT NULL DEFAULT 0.0,
+    merged_qty  REAL NOT NULL DEFAULT 0.0,
+    d_max       REAL NOT NULL DEFAULT 0.0,
+    phase_time  TEXT,
+    created_at  TEXT NOT NULL,
+    updated_at  TEXT NOT NULL
+);
+"""
+
 # 校正戦略用の新カラム (既存 DB との後方互換性のため ALTER TABLE で追加)
 _CALIBRATION_COLUMNS = [
     ("market_type", "TEXT DEFAULT 'moneyline'"),
@@ -452,6 +470,29 @@ def _ensure_llm_analyses_table(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+def _ensure_position_groups_table(conn: sqlite3.Connection) -> None:
+    """Create position_groups table and ensure columns for Track B state machine."""
+    conn.executescript(POSITION_GROUPS_SQL)
+    existing = {row[1] for row in conn.execute("PRAGMA table_info(position_groups)").fetchall()}
+    columns = [
+        ("game_date", "TEXT NOT NULL DEFAULT ''"),
+        ("state", "TEXT NOT NULL DEFAULT 'PLANNED'"),
+        ("M_target", "REAL NOT NULL DEFAULT 0.0"),
+        ("D_target", "REAL NOT NULL DEFAULT 0.0"),
+        ("q_dir", "REAL NOT NULL DEFAULT 0.0"),
+        ("q_opp", "REAL NOT NULL DEFAULT 0.0"),
+        ("merged_qty", "REAL NOT NULL DEFAULT 0.0"),
+        ("d_max", "REAL NOT NULL DEFAULT 0.0"),
+        ("phase_time", "TEXT"),
+        ("created_at", "TEXT"),
+        ("updated_at", "TEXT"),
+    ]
+    for col_name, col_def in columns:
+        if col_name not in existing:
+            conn.execute(f"ALTER TABLE position_groups ADD COLUMN {col_name} {col_def}")
+    conn.commit()
+
+
 RISK_TABLES_SQL = """
 CREATE TABLE IF NOT EXISTS circuit_breaker_events (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -496,6 +537,8 @@ def _ensure_indexes(conn: sqlite3.Connection) -> None:
         "CREATE INDEX IF NOT EXISTS idx_results_settled_at ON results(settled_at)",
         "CREATE INDEX IF NOT EXISTS idx_trade_jobs_status ON trade_jobs(status)",
         "CREATE INDEX IF NOT EXISTS idx_trade_jobs_game_date ON trade_jobs(game_date)",
+        "CREATE INDEX IF NOT EXISTS idx_position_groups_state ON position_groups(state)",
+        "CREATE INDEX IF NOT EXISTS idx_position_groups_event_slug ON position_groups(event_slug)",
     ]
     for sql in indexes:
         conn.execute(sql)
@@ -521,5 +564,6 @@ def _connect(db_path: Path | str = DEFAULT_DB_PATH) -> sqlite3.Connection:
     _ensure_order_lifecycle_columns(conn)
     _ensure_risk_tables(conn)
     _ensure_llm_analyses_table(conn)
+    _ensure_position_groups_table(conn)
     _ensure_indexes(conn)
     return conn

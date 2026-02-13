@@ -12,6 +12,7 @@ from src.store.models import (  # noqa: F401
     MergeOperation,
     OrderEvent,
     PerformanceStats,
+    PositionGroupRecord,
     ResultRecord,
     SignalRecord,
     TradeJob,
@@ -19,6 +20,7 @@ from src.store.models import (  # noqa: F401
 from src.store.schema import (  # noqa: F401
     DEFAULT_DB_PATH,
     MERGE_OPERATIONS_SQL,
+    POSITION_GROUPS_SQL,
     SCHEMA_SQL,
     TRADE_JOBS_SQL,
     _connect,
@@ -431,6 +433,7 @@ def upsert_trade_job(
 
 def get_eligible_jobs(
     now_utc: str,
+    max_retries: int = 3,
     db_path: Path | str = DEFAULT_DB_PATH,
 ) -> list[TradeJob]:
     """Get jobs in the execution window: pending/failed, within window, retry < max."""
@@ -441,9 +444,9 @@ def get_eligible_jobs(
                WHERE status IN ('pending', 'failed')
                  AND execute_after <= ?
                  AND execute_before > ?
-                 AND retry_count < 3
+                 AND retry_count < ?
                ORDER BY game_time_utc ASC""",
-            (now_utc, now_utc),
+            (now_utc, now_utc, max_retries),
         ).fetchall()
         return [TradeJob(**dict(r)) for r in rows]
     finally:
@@ -692,6 +695,304 @@ def update_job_bothside(
         params.append(job_id)
         conn.execute(
             f"UPDATE trade_jobs SET {', '.join(parts)} WHERE id = ?",
+            tuple(params),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+# ---------------------------------------------------------------------------
+# Position groups (Track B)
+# ---------------------------------------------------------------------------
+
+
+def upsert_position_group(
+    *,
+    event_slug: str,
+    game_date: str,
+    state: str = "PLANNED",
+    m_target: float = 0.0,
+    d_target: float = 0.0,
+    d_max: float = 0.0,
+    phase_time: str | None = None,
+    db_path: Path | str = DEFAULT_DB_PATH,
+) -> int:
+    """Insert/update a position group for one game event."""
+    now = datetime.now(timezone.utc).isoformat()
+    conn = _connect(db_path)
+    try:
+        conn.execute(
+            """INSERT INTO position_groups
+               (event_slug, game_date, state, M_target, D_target, q_dir, q_opp,
+                merged_qty, d_max, phase_time, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, 0.0, 0.0, 0.0, ?, ?, ?, ?)
+               ON CONFLICT(event_slug) DO UPDATE SET
+                   game_date = excluded.game_date,
+                   d_max = CASE
+                       WHEN position_groups.d_max > 0 THEN position_groups.d_max
+                       ELSE excluded.d_max
+                   END,
+                   phase_time = COALESCE(excluded.phase_time, position_groups.phase_time),
+                   updated_at = excluded.updated_at""",
+            (
+                event_slug,
+                game_date,
+                state,
+                m_target,
+                d_target,
+                d_max,
+                phase_time,
+                now,
+                now,
+            ),
+        )
+        conn.commit()
+        row = conn.execute(
+            "SELECT id FROM position_groups WHERE event_slug = ?",
+            (event_slug,),
+        ).fetchone()
+        return int(row[0]) if row else 0
+    finally:
+        conn.close()
+
+
+def get_position_group(
+    event_slug: str,
+    db_path: Path | str = DEFAULT_DB_PATH,
+) -> PositionGroupRecord | None:
+    """Fetch one position group by event slug."""
+    conn = _connect(db_path)
+    try:
+        row = conn.execute(
+            "SELECT * FROM position_groups WHERE event_slug = ?",
+            (event_slug,),
+        ).fetchone()
+        if row:
+            return PositionGroupRecord(**dict(row))
+        return None
+    finally:
+        conn.close()
+
+
+def get_open_position_groups(
+    db_path: Path | str = DEFAULT_DB_PATH,
+) -> list[PositionGroupRecord]:
+    """Fetch non-terminal position groups."""
+    conn = _connect(db_path)
+    try:
+        rows = conn.execute(
+            """SELECT * FROM position_groups
+               WHERE state NOT IN ('CLOSED', 'SAFE_STOP')
+               ORDER BY updated_at ASC""",
+        ).fetchall()
+        return [PositionGroupRecord(**dict(r)) for r in rows]
+    finally:
+        conn.close()
+
+
+def get_group_execute_before(
+    event_slug: str,
+    db_path: Path | str = DEFAULT_DB_PATH,
+) -> str | None:
+    """Get directional job execute_before timestamp for an event."""
+    conn = _connect(db_path)
+    try:
+        row = conn.execute(
+            """SELECT execute_before FROM trade_jobs
+               WHERE event_slug = ? AND job_side = 'directional'
+               ORDER BY id ASC
+               LIMIT 1""",
+            (event_slug,),
+        ).fetchone()
+        return row[0] if row else None
+    finally:
+        conn.close()
+
+
+def compute_position_group_inventory(
+    event_slug: str,
+    db_path: Path | str = DEFAULT_DB_PATH,
+) -> tuple[float, float, float]:
+    """Compute net inventory shares (directional, opposite) and merged quantity.
+
+    Inventory source of truth is filled and unsettled signals.
+    """
+    conn = _connect(db_path)
+    try:
+        rows = conn.execute(
+            """SELECT s.signal_role AS role,
+                      COALESCE(SUM(
+                          CASE
+                              WHEN COALESCE(s.fill_price, s.poly_price) > 0
+                              THEN s.kelly_size / COALESCE(s.fill_price, s.poly_price)
+                              ELSE 0
+                          END
+                      ), 0.0) AS shares
+               FROM signals s
+               LEFT JOIN results r ON r.signal_id = s.id
+               WHERE s.event_slug = ?
+                 AND r.id IS NULL
+                 AND s.order_status = 'filled'
+                 AND s.signal_role IN ('directional', 'hedge')
+               GROUP BY s.signal_role""",
+            (event_slug,),
+        ).fetchall()
+
+        dir_shares = 0.0
+        opp_shares = 0.0
+        for row in rows:
+            if row["role"] == "directional":
+                dir_shares = float(row["shares"])
+            elif row["role"] == "hedge":
+                opp_shares = float(row["shares"])
+
+        merge_row = conn.execute(
+            """SELECT COALESCE(SUM(merge_amount), 0.0) AS merged
+               FROM merge_operations
+               WHERE event_slug = ?
+                 AND status IN ('executed', 'simulated')""",
+            (event_slug,),
+        ).fetchone()
+        merged_qty = float(merge_row["merged"]) if merge_row else 0.0
+
+        # MERGE 済み在庫を差し引いた純在庫
+        net_dir = max(dir_shares - merged_qty, 0.0)
+        net_opp = max(opp_shares - merged_qty, 0.0)
+        return net_dir, net_opp, merged_qty
+    finally:
+        conn.close()
+
+
+def get_position_group_sizing_snapshot(
+    event_slug: str,
+    db_path: Path | str = DEFAULT_DB_PATH,
+) -> dict:
+    """Get latest directional/hedge pricing and filled VWAP inputs for B3 sizing."""
+    conn = _connect(db_path)
+    try:
+        dir_row = conn.execute(
+            """SELECT
+                   COALESCE(fill_price, poly_price) AS price,
+                   expected_win_rate,
+                   band_confidence
+               FROM signals
+               WHERE event_slug = ?
+                 AND signal_role = 'directional'
+               ORDER BY created_at DESC, id DESC
+               LIMIT 1""",
+            (event_slug,),
+        ).fetchone()
+
+        opp_row = conn.execute(
+            """SELECT COALESCE(fill_price, poly_price) AS price
+               FROM signals
+               WHERE event_slug = ?
+                 AND signal_role = 'hedge'
+               ORDER BY created_at DESC, id DESC
+               LIMIT 1""",
+            (event_slug,),
+        ).fetchone()
+
+        role_rows = conn.execute(
+            """SELECT s.signal_role AS role,
+                      COALESCE(SUM(s.kelly_size), 0.0) AS cost_usd,
+                      COALESCE(SUM(
+                          CASE
+                              WHEN COALESCE(s.fill_price, s.poly_price) > 0
+                              THEN s.kelly_size / COALESCE(s.fill_price, s.poly_price)
+                              ELSE 0
+                          END
+                      ), 0.0) AS shares
+               FROM signals s
+               LEFT JOIN results r ON r.signal_id = s.id
+               WHERE s.event_slug = ?
+                 AND r.id IS NULL
+                 AND s.order_status = 'filled'
+                 AND s.signal_role IN ('directional', 'hedge')
+               GROUP BY s.signal_role""",
+            (event_slug,),
+        ).fetchall()
+
+        dir_vwap = None
+        opp_vwap = None
+        for row in role_rows:
+            shares = float(row["shares"] or 0.0)
+            cost = float(row["cost_usd"] or 0.0)
+            if shares <= 0:
+                continue
+            vwap = cost / shares
+            if row["role"] == "directional":
+                dir_vwap = vwap
+            elif row["role"] == "hedge":
+                opp_vwap = vwap
+
+        return {
+            "directional_price": float(dir_row["price"]) if dir_row and dir_row["price"] else None,
+            "opposite_price": float(opp_row["price"]) if opp_row and opp_row["price"] else None,
+            "directional_expected_win_rate": (
+                float(dir_row["expected_win_rate"])
+                if dir_row and dir_row["expected_win_rate"] is not None
+                else None
+            ),
+            "directional_band_confidence": (
+                str(dir_row["band_confidence"])
+                if dir_row and dir_row["band_confidence"] is not None
+                else ""
+            ),
+            "directional_vwap": dir_vwap,
+            "opposite_vwap": opp_vwap,
+        }
+    finally:
+        conn.close()
+
+
+def update_position_group(
+    event_slug: str,
+    *,
+    state: str | None = None,
+    m_target: float | None = None,
+    d_target: float | None = None,
+    q_dir: float | None = None,
+    q_opp: float | None = None,
+    merged_qty: float | None = None,
+    d_max: float | None = None,
+    phase_time: str | None = None,
+    db_path: Path | str = DEFAULT_DB_PATH,
+) -> None:
+    """Update one position group."""
+    now = datetime.now(timezone.utc).isoformat()
+    conn = _connect(db_path)
+    try:
+        parts: list[str] = ["updated_at = ?"]
+        params: list[object] = [now]
+        if state is not None:
+            parts.append("state = ?")
+            params.append(state)
+        if m_target is not None:
+            parts.append("M_target = ?")
+            params.append(m_target)
+        if d_target is not None:
+            parts.append("D_target = ?")
+            params.append(d_target)
+        if q_dir is not None:
+            parts.append("q_dir = ?")
+            params.append(q_dir)
+        if q_opp is not None:
+            parts.append("q_opp = ?")
+            params.append(q_opp)
+        if merged_qty is not None:
+            parts.append("merged_qty = ?")
+            params.append(merged_qty)
+        if d_max is not None:
+            parts.append("d_max = ?")
+            params.append(d_max)
+        if phase_time is not None:
+            parts.append("phase_time = ?")
+            params.append(phase_time)
+        params.append(event_slug)
+        conn.execute(
+            f"UPDATE position_groups SET {', '.join(parts)} WHERE event_slug = ?",
             tuple(params),
         )
         conn.commit()
@@ -1670,8 +1971,7 @@ def force_stop_dca_jobs(
 def get_active_placed_orders(
     db_path: Path | str = DEFAULT_DB_PATH,
 ) -> list[SignalRecord]:
-    """Return signals with order_status='placed', unsettled, and within execution window."""
-    now_utc = datetime.now(timezone.utc).isoformat()
+    """Return unsettled signals with order_status='placed' and non-null order_id."""
     conn = _connect(db_path)
     try:
         rows = conn.execute(
@@ -1682,9 +1982,7 @@ def get_active_placed_orders(
                WHERE r.id IS NULL
                  AND s.order_status = 'placed'
                  AND s.order_id IS NOT NULL
-                 AND j.execute_before > ?
                ORDER BY s.created_at ASC""",
-            (now_utc,),
         ).fetchall()
         return [SignalRecord(**dict(r)) for r in rows]
     finally:

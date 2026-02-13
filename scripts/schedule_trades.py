@@ -41,6 +41,7 @@ def main() -> None:
         process_dca_active_jobs,
         process_eligible_jobs,
         process_merge_eligible,
+        process_position_groups_tick,
         refresh_schedule,
     )
     from src.store.db import DEFAULT_DB_PATH, cancel_expired_jobs
@@ -204,6 +205,11 @@ def main() -> None:
             len(merge_executed),
             len(merge_failed),
         )
+
+    # 3d. PositionGroup 状態機械更新 (Track B)
+    position_group_transitions = process_position_groups_tick(db_path=db_path)
+    if position_group_transitions:
+        log.info("PositionGroup transitions: %d", position_group_transitions)
 
     # 4. 決済 (オプション)
     if not args.no_settle:

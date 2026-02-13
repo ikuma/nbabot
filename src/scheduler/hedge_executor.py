@@ -159,6 +159,30 @@ def _defer_or_skip_hedge_job(
     update_job_status(job_id, status, error_message=reason, db_path=db_path)
 
 
+def _is_leg2_timeout(dir_signals: list, now_utc: datetime) -> bool:
+    """Check whether waiting for second leg exceeded timeout."""
+    if not settings.game_position_group_enabled:
+        return False
+    timeout_min = settings.position_group_leg2_timeout_min
+    if timeout_min <= 0:
+        return False
+
+    created_times: list[datetime] = []
+    for sig in dir_signals:
+        ts = getattr(sig, "created_at", None)
+        if not ts:
+            continue
+        try:
+            created_times.append(datetime.fromisoformat(ts.replace("Z", "+00:00")))
+        except ValueError:
+            continue
+
+    if not created_times:
+        return False
+    oldest = min(created_times)
+    return (now_utc - oldest).total_seconds() >= timeout_min * 60
+
+
 def process_hedge_job(
     job: TradeJob,
     execution_mode: str,
@@ -188,6 +212,37 @@ def process_hedge_job(
             dir_signals = get_dca_group_signals(
                 _get_directional_dca_group(job.paired_job_id, db_path), db_path=db_path
             )
+            if not dir_signals:
+                _defer_or_skip_hedge_job(
+                    job_id=job.id,
+                    execution_mode=execution_mode,
+                    reason="No directional signals",
+                    db_path=db_path,
+                )
+                return JobResult(job.id, job.event_slug, "skipped")
+
+        # live 実運用では directional の約定在庫ができるまで hedge を待機
+        if execution_mode == "live" and dir_signals:
+            filled_dir_signals = [s for s in dir_signals if s.order_status == "filled"]
+            if not filled_dir_signals:
+                _defer_or_skip_hedge_job(
+                    job_id=job.id,
+                    execution_mode=execution_mode,
+                    reason="Directional not filled yet",
+                    db_path=db_path,
+                )
+                return JobResult(job.id, job.event_slug, "skipped")
+            dir_signals = filled_dir_signals
+
+        if _is_leg2_timeout(dir_signals, datetime.now(timezone.utc)):
+            update_job_status(
+                job.id,
+                "skipped",
+                error_message="Leg2 timeout",
+                db_path=db_path,
+            )
+            logger.warning("Hedge job %d: leg2 timeout -> skipped", job.id)
+            return JobResult(job.id, job.event_slug, "skipped")
 
         # 最新価格を取得
         ml = fetch_moneyline_for_game(job.away_team, job.home_team, job.game_date)
@@ -379,6 +434,16 @@ def process_hedge_job(
             )
             return JobResult(job.id, job.event_slug, "skipped")
 
+        if execution_mode == "live" and not _preflight_check():
+            update_job_status(
+                job.id,
+                "failed",
+                error_message="Preflight check failed",
+                increment_retry=True,
+                db_path=db_path,
+            )
+            return JobResult(job.id, job.event_slug, "failed", error="preflight failed")
+
         # DCA グループ ID (hedge 独立)
         dca_group_id = str(uuid.uuid4())
 
@@ -417,17 +482,6 @@ def process_hedge_job(
 
         # live モード
         if execution_mode == "live":
-            if not _preflight_check():
-                update_job_status(
-                    job.id,
-                    "failed",
-                    signal_id=signal_id,
-                    error_message="Preflight check failed",
-                    increment_retry=True,
-                    db_path=db_path,
-                )
-                return JobResult(job.id, job.event_slug, "failed", signal_id, "preflight failed")
-
             try:
                 resp = place_limit_buy(hedge_token_id, order_price, budget.slice_size_usd)
                 order_id = resp.get("orderID") or resp.get("id", "")
