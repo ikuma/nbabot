@@ -131,7 +131,9 @@ def process_merge_eligible(
     from src.store.db import (
         get_bothside_signals,
         get_merge_candidate_groups,
+        get_position_group,
         log_merge_operation,
+        log_position_group_audit_event,
         update_job_merge_status,
         update_merge_operation,
         update_signal_merge_data,
@@ -407,6 +409,33 @@ def process_merge_eligible(
                 )
                 if is_early_partial:
                     early_partial_executed += 1
+
+            # 即時通知 (Phase N)
+            try:
+                group = get_position_group(event_slug, db_path=path)
+                log_position_group_audit_event(
+                    event_slug=event_slug,
+                    audit_type="merge",
+                    prev_state=group.state if group else None,
+                    new_state=group.state if group else None,
+                    reason="merge_executed",
+                    m_target=group.M_target if group else None,
+                    d_target=group.D_target if group else None,
+                    q_dir=group.q_dir if group else None,
+                    q_opp=group.q_opp if group else None,
+                    d=(
+                        (group.q_dir - group.q_opp)
+                        if group is not None
+                        else None
+                    ),
+                    m=min(group.q_dir, group.q_opp) if group is not None else None,
+                    d_max=group.d_max if group else None,
+                    merge_amount=merge_amount,
+                    merged_qty=group.merged_qty if group else None,
+                    db_path=path,
+                )
+            except Exception:
+                logger.debug("PositionGroup merge audit logging failed", exc_info=True)
 
             # 即時通知 (Phase N)
             try:

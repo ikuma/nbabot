@@ -13,6 +13,7 @@ from src.store.db import (
     get_group_execute_before,
     get_open_position_groups,
     get_position_group_sizing_snapshot,
+    log_position_group_audit_event,
     update_position_group,
 )
 from src.strategy.position_group_sizing import (
@@ -101,6 +102,38 @@ def _compute_dynamic_d_max(
     t = mins_to_tipoff / start_min
     ratio = floor_ratio + (1.0 - floor_ratio) * t
     return base_d_max * ratio
+
+
+def _derive_transition_reason(
+    *,
+    prev_state: str,
+    new_state: str,
+    execute_before: str | None,
+    now_utc: datetime,
+    d: float,
+    m: float,
+    d_max: float,
+    risk_ctx: _RiskContext,
+) -> str:
+    if prev_state == new_state:
+        return "no_transition"
+    if new_state == "SAFE_STOP":
+        return risk_ctx.safe_stop_reason or "safe_stop"
+    if prev_state == "PLANNED" and new_state == "ACQUIRE":
+        return "start_acquire"
+    if prev_state == "PLANNED" and new_state == "RESIDUAL_HOLD":
+        return "new_risk_cutoff"
+    if new_state == "BALANCE" and abs(d) > d_max:
+        return "d_exceeds_dmax"
+    if new_state == "MERGE_LOOP" and m >= settings.position_group_min_merge_shares:
+        return "mergeable_inventory"
+    if new_state == "RESIDUAL_HOLD" and _is_new_risk_blocked(execute_before, now_utc):
+        return "new_risk_cutoff"
+    if prev_state == "RESIDUAL_HOLD" and new_state == "EXIT":
+        return "tipoff_passed"
+    if prev_state == "EXIT" and new_state == "CLOSED":
+        return "inventory_closed"
+    return "transition"
 
 
 def _parse_safe_stop_flags(raw: str) -> set[str]:
@@ -261,6 +294,38 @@ def process_position_groups(
             phase_time=now_iso if next_state != group.state else group.phase_time,
             db_path=path,
         )
+        merge_amount = max(merged_qty - max(group.merged_qty, 0.0), 0.0)
+        reason = _derive_transition_reason(
+            prev_state=group.state,
+            new_state=next_state,
+            execute_before=execute_before,
+            now_utc=now_dt,
+            d=d,
+            m=m,
+            d_max=d_max_t,
+            risk_ctx=risk_ctx,
+        )
+        try:
+            log_position_group_audit_event(
+                event_slug=group.event_slug,
+                audit_type="tick",
+                prev_state=group.state,
+                new_state=next_state,
+                reason=reason,
+                m_target=targets.m_target,
+                d_target=targets.d_target,
+                q_dir=q_dir,
+                q_opp=q_opp,
+                d=d,
+                m=m,
+                d_max=d_max_t,
+                merge_amount=merge_amount,
+                merged_qty=merged_qty,
+                created_at=now_iso,
+                db_path=path,
+            )
+        except Exception:
+            logger.exception("PositionGroup audit logging failed: %s", group.event_slug)
 
         results.append(
             PositionGroupTickResult(

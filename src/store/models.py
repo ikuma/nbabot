@@ -196,3 +196,23 @@ class PositionGroupRecord:
     phase_time: str | None
     created_at: str
     updated_at: str
+
+
+@dataclass
+class PositionGroupAuditEvent:
+    id: int
+    event_slug: str
+    audit_type: str
+    prev_state: str | None
+    new_state: str | None
+    reason: str | None
+    M_target: float | None
+    D_target: float | None
+    q_dir: float | None
+    q_opp: float | None
+    d: float | None
+    m: float | None
+    d_max: float | None
+    merge_amount: float | None
+    merged_qty: float | None
+    created_at: str

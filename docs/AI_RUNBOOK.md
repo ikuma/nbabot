@@ -25,6 +25,8 @@
 - 未決済一覧: `python scripts/settle.py --list`
 - 接続確認: `python scripts/check_balance.py`
 - 実運用前ゲート(疎通+shadow+paper+最小回帰): `python scripts/pre_practice_gate.py`
+- PositionGroup監査/違反率レポート: `python scripts/report_position_groups.py --db data/paper_trades.db`
+- PositionGroup戦略比較バックテスト: `python scripts/run_position_group_backtest.py --input <dataset.json>`
 
 ## launchd
 

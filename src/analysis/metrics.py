@@ -9,6 +9,7 @@ Provides clear separation of:
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from datetime import datetime
 from typing import TYPE_CHECKING
@@ -59,6 +60,18 @@ class CapitalTurnoverMetrics:
     avg_locked_capital_usd: float
     capital_turnover_ratio: float
     profit_opportunity_cycles: float
+
+
+@dataclass(frozen=True)
+class PositionGroupRiskMetrics:
+    """Inventory risk metrics around |d| <= D_max(t) guardrail."""
+
+    samples: int
+    violation_count: int
+    violation_rate: float
+    max_violation_abs: float
+    max_violation_ratio: float
+    p95_violation_abs: float
 
 
 def compute_decomposed_metrics(
@@ -203,6 +216,58 @@ def compute_capital_turnover_metrics(
     )
 
 
+def compute_position_group_risk_metrics(rows: list[dict]) -> PositionGroupRiskMetrics:
+    """Compute D_max violation metrics from tick-level audit rows."""
+    if not rows:
+        return PositionGroupRiskMetrics(
+            samples=0,
+            violation_count=0,
+            violation_rate=0.0,
+            max_violation_abs=0.0,
+            max_violation_ratio=0.0,
+            p95_violation_abs=0.0,
+        )
+
+    violations: list[float] = []
+    ratios: list[float] = []
+    valid_samples = 0
+    for row in rows:
+        d = row.get("d")
+        d_max = row.get("d_max")
+        if d is None or d_max is None:
+            continue
+        d_val = abs(float(d))
+        d_max_val = max(float(d_max), 0.0)
+        valid_samples += 1
+        excess = max(d_val - d_max_val, 0.0)
+        if excess > 0:
+            violations.append(excess)
+            ratio = d_val / d_max_val if d_max_val > 0 else float("inf")
+            ratios.append(ratio)
+
+    if valid_samples == 0:
+        return PositionGroupRiskMetrics(
+            samples=0,
+            violation_count=0,
+            violation_rate=0.0,
+            max_violation_abs=0.0,
+            max_violation_ratio=0.0,
+            p95_violation_abs=0.0,
+        )
+
+    violations_sorted = sorted(violations)
+    p95_idx = max(math.ceil(len(violations_sorted) * 0.95) - 1, 0) if violations_sorted else 0
+    p95 = violations_sorted[p95_idx] if violations_sorted else 0.0
+    return PositionGroupRiskMetrics(
+        samples=valid_samples,
+        violation_count=len(violations),
+        violation_rate=(len(violations) / valid_samples),
+        max_violation_abs=max(violations, default=0.0),
+        max_violation_ratio=max(ratios, default=0.0),
+        p95_violation_abs=p95,
+    )
+
+
 @dataclass(frozen=True)
 class MergeProfileMetrics:
     """MERGE profiling metrics computed from condition dicts."""
@@ -318,4 +383,15 @@ def format_capital_turnover_summary(m: CapitalTurnoverMetrics) -> str:
         f"| Released=${m.total_released_usd:.2f} "
         f"| Avg lock={m.avg_lock_hours_weighted:.1f}h "
         f"| Turnover={m.capital_turnover_ratio:.3f}x"
+    )
+
+
+def format_position_group_risk_summary(m: PositionGroupRiskMetrics) -> str:
+    """Format position group risk metrics for log/summary output."""
+    return (
+        f"DMax violations={m.violation_count}/{m.samples} "
+        f"({m.violation_rate*100:.2f}%) "
+        f"| max_abs={m.max_violation_abs:.2f} "
+        f"| max_ratio={m.max_violation_ratio:.2f}x "
+        f"| p95_abs={m.p95_violation_abs:.2f}"
     )

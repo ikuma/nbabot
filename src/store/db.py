@@ -12,6 +12,7 @@ from src.store.models import (  # noqa: F401
     MergeOperation,
     OrderEvent,
     PerformanceStats,
+    PositionGroupAuditEvent,
     PositionGroupRecord,
     ResultRecord,
     SignalRecord,
@@ -996,6 +997,116 @@ def update_position_group(
             tuple(params),
         )
         conn.commit()
+    finally:
+        conn.close()
+
+
+def log_position_group_audit_event(
+    *,
+    event_slug: str,
+    audit_type: str = "tick",
+    prev_state: str | None = None,
+    new_state: str | None = None,
+    reason: str | None = None,
+    m_target: float | None = None,
+    d_target: float | None = None,
+    q_dir: float | None = None,
+    q_opp: float | None = None,
+    d: float | None = None,
+    m: float | None = None,
+    d_max: float | None = None,
+    merge_amount: float | None = None,
+    merged_qty: float | None = None,
+    created_at: str | None = None,
+    db_path: Path | str = DEFAULT_DB_PATH,
+) -> int:
+    """Insert one position group audit event and return row id."""
+    now = created_at or datetime.now(timezone.utc).isoformat()
+    conn = _connect(db_path)
+    try:
+        cur = conn.execute(
+            """INSERT INTO position_group_audit_events
+               (event_slug, audit_type, prev_state, new_state, reason,
+                M_target, D_target, q_dir, q_opp, d, m, d_max,
+                merge_amount, merged_qty, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                event_slug,
+                audit_type,
+                prev_state,
+                new_state,
+                reason,
+                m_target,
+                d_target,
+                q_dir,
+                q_opp,
+                d,
+                m,
+                d_max,
+                merge_amount,
+                merged_qty,
+                now,
+            ),
+        )
+        conn.commit()
+        return int(cur.lastrowid)
+    finally:
+        conn.close()
+
+
+def get_position_group_audit_events(
+    event_slug: str,
+    *,
+    limit: int | None = None,
+    db_path: Path | str = DEFAULT_DB_PATH,
+) -> list[PositionGroupAuditEvent]:
+    """Fetch audit events for one position group, ordered by time then id."""
+    conn = _connect(db_path)
+    try:
+        sql = (
+            "SELECT * FROM position_group_audit_events "
+            "WHERE event_slug = ? ORDER BY created_at ASC, id ASC"
+        )
+        params: tuple[object, ...] = (event_slug,)
+        if limit is not None and limit > 0:
+            sql += " LIMIT ?"
+            params = (event_slug, int(limit))
+        rows = conn.execute(sql, params).fetchall()
+        return [PositionGroupAuditEvent(**dict(r)) for r in rows]
+    finally:
+        conn.close()
+
+
+def get_position_group_risk_inputs(
+    *,
+    db_path: Path | str = DEFAULT_DB_PATH,
+    event_slug: str | None = None,
+    start_at: str | None = None,
+    end_at: str | None = None,
+) -> list[dict]:
+    """Get tick-level audit rows for D_max violation risk metrics."""
+    conn = _connect(db_path)
+    try:
+        where_parts = ["audit_type = 'tick'"]
+        params: list[object] = []
+        if event_slug:
+            where_parts.append("event_slug = ?")
+            params.append(event_slug)
+        if start_at:
+            where_parts.append("created_at >= ?")
+            params.append(start_at)
+        if end_at:
+            where_parts.append("created_at < ?")
+            params.append(end_at)
+        where_sql = " AND ".join(where_parts)
+        rows = conn.execute(
+            f"""SELECT event_slug, created_at, d, d_max
+                FROM position_group_audit_events
+                WHERE {where_sql}
+                ORDER BY created_at ASC, id ASC""",
+            tuple(params),
+        ).fetchall()
+        return [dict(r) for r in rows]
     finally:
         conn.close()
 

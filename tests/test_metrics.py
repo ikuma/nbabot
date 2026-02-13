@@ -14,8 +14,10 @@ from src.analysis.metrics import (
     DecomposedMetrics,
     compute_capital_turnover_metrics,
     compute_decomposed_metrics,
+    compute_position_group_risk_metrics,
     format_capital_turnover_summary,
     format_decomposed_summary,
+    format_position_group_risk_summary,
 )
 from src.store.models import ResultRecord, SignalRecord
 
@@ -248,3 +250,38 @@ class TestCapitalTurnoverMetrics:
         assert "MERGE net=$+0.40" in s
         assert "Released=$9.90" in s
         assert "Avg lock=2.0h" in s
+
+
+class TestPositionGroupRiskMetrics:
+    def test_empty(self):
+        m = compute_position_group_risk_metrics([])
+        assert m.samples == 0
+        assert m.violation_count == 0
+        assert m.violation_rate == 0.0
+
+    def test_violation_stats(self):
+        rows = [
+            {"d": 8.0, "d_max": 10.0},
+            {"d": -12.0, "d_max": 10.0},  # excess=2
+            {"d": 15.0, "d_max": 10.0},  # excess=5
+            {"d": 9.0, "d_max": 10.0},
+            {"d": -11.0, "d_max": 10.0},  # excess=1
+        ]
+        m = compute_position_group_risk_metrics(rows)
+        assert m.samples == 5
+        assert m.violation_count == 3
+        assert m.violation_rate == pytest.approx(0.6)
+        assert m.max_violation_abs == pytest.approx(5.0)
+        assert m.max_violation_ratio == pytest.approx(1.5)
+        assert m.p95_violation_abs == pytest.approx(5.0)
+
+    def test_format_summary(self):
+        m = compute_position_group_risk_metrics(
+            [
+                {"d": 12.0, "d_max": 10.0},
+                {"d": 9.0, "d_max": 10.0},
+            ]
+        )
+        s = format_position_group_risk_summary(m)
+        assert "DMax violations=1/2" in s
+        assert "max_ratio=1.20x" in s

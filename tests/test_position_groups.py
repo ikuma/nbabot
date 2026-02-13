@@ -14,6 +14,7 @@ from src.scheduler.trade_scheduler import refresh_schedule
 from src.store.db import (
     compute_position_group_inventory,
     get_position_group,
+    get_position_group_audit_events,
     log_merge_operation,
     log_result,
     log_signal,
@@ -377,6 +378,80 @@ def test_state_transition_to_safe_stop_on_risk_engine_error(db_path: Path, monke
     now = datetime(2026, 2, 10, 18, 0, tzinfo=timezone.utc)
     results = process_position_groups(db_path=str(db_path), now_utc=now)
     assert results[0].new_state == "SAFE_STOP"
+
+
+def test_process_position_groups_logs_audit_event(db_path: Path):
+    event_slug = "nba-nyk-bos-2026-02-10"
+    execute_before = "2026-02-11T01:00:00+00:00"
+    _insert_job(db_path, event_slug=event_slug, execute_before=execute_before)
+    upsert_position_group(
+        event_slug=event_slug,
+        game_date="2026-02-10",
+        state="PLANNED",
+        d_max=20.0,
+        db_path=db_path,
+    )
+
+    now = datetime(2026, 2, 10, 18, 0, tzinfo=timezone.utc)
+    process_position_groups(db_path=str(db_path), now_utc=now)
+    events = get_position_group_audit_events(event_slug, db_path=db_path)
+    assert len(events) == 1
+    assert events[0].audit_type == "tick"
+    assert events[0].prev_state == "PLANNED"
+    assert events[0].new_state == "ACQUIRE"
+    assert events[0].reason == "start_acquire"
+    assert events[0].M_target is not None
+    assert events[0].D_target is not None
+
+
+def test_audit_event_records_merge_amount_delta(db_path: Path):
+    event_slug = "nba-nyk-bos-2026-02-10"
+    execute_before = "2026-02-11T01:00:00+00:00"
+    _insert_job(db_path, event_slug=event_slug, execute_before=execute_before)
+    upsert_position_group(
+        event_slug=event_slug,
+        game_date="2026-02-10",
+        state="ACQUIRE",
+        d_max=100.0,
+        db_path=db_path,
+    )
+    _log_sig(
+        db_path,
+        event_slug=event_slug,
+        signal_role="directional",
+        kelly_size=5.0,
+        poly_price=0.50,
+        order_status="filled",
+    )  # 10 shares
+    _log_sig(
+        db_path,
+        event_slug=event_slug,
+        signal_role="hedge",
+        kelly_size=5.0,
+        poly_price=0.50,
+        order_status="filled",
+    )  # 10 shares
+    log_merge_operation(
+        bothside_group_id="bs-audit-1",
+        condition_id="cond-audit",
+        event_slug=event_slug,
+        dir_shares=10.0,
+        hedge_shares=10.0,
+        merge_amount=4.0,
+        remainder_shares=6.0,
+        remainder_side="directional",
+        dir_vwap=0.5,
+        hedge_vwap=0.5,
+        combined_vwap=1.0,
+        status="executed",
+        db_path=db_path,
+    )
+
+    now = datetime(2026, 2, 10, 18, 0, tzinfo=timezone.utc)
+    process_position_groups(db_path=str(db_path), now_utc=now)
+    events = get_position_group_audit_events(event_slug, db_path=db_path)
+    assert len(events) == 1
+    assert events[0].merge_amount == pytest.approx(4.0)
 
 
 def test_process_updates_m_and_d_targets(db_path: Path):

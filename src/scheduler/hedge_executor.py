@@ -9,6 +9,7 @@ from __future__ import annotations
 import logging
 import uuid
 from datetime import datetime, timedelta, timezone
+from numbers import Real
 
 from src.config import settings
 from src.scheduler.job_executor import JobResult
@@ -161,9 +162,18 @@ def _defer_or_skip_hedge_job(
 
 def _is_leg2_timeout(dir_signals: list, now_utc: datetime) -> bool:
     """Check whether waiting for second leg exceeded timeout."""
-    if not settings.game_position_group_enabled:
+    if not bool(getattr(settings, "game_position_group_enabled", False)):
         return False
-    timeout_min = settings.position_group_leg2_timeout_min
+
+    raw_timeout = getattr(settings, "position_group_leg2_timeout_min", 0)
+    timeout_min = 0
+    if isinstance(raw_timeout, Real):
+        timeout_min = int(raw_timeout)
+    elif isinstance(raw_timeout, str):
+        try:
+            timeout_min = int(float(raw_timeout))
+        except ValueError:
+            timeout_min = 0
     if timeout_min <= 0:
         return False
 

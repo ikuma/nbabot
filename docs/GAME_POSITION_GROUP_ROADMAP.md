@@ -76,8 +76,10 @@
 
 ## B Done Criteria
 - [ ] バックテストで「MERGE-only」「Directional-only」より合成戦略が優位
+  - [x] 比較ハーネス実装 (`scripts/run_position_group_backtest.py`)
 - [ ] 在庫逸脱 (`|d| > D_max`) の違反率が閾値未満
-- [ ] 監査ログで `M*`,`D*`,`q_dir`,`q_opp`,`merge_amount` を追跡可能
+  - [x] 違反率メトリクス/レポート実装 (`scripts/report_position_groups.py`)
+- [x] 監査ログで `M*`,`D*`,`q_dir`,`q_opp`,`merge_amount` を追跡可能
 
 ## Suggested Delivery Order
 1. Track Aを完了（現行挙動の歪みを先に解消）

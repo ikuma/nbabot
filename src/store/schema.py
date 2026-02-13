@@ -106,6 +106,27 @@ CREATE TABLE IF NOT EXISTS position_groups (
 );
 """
 
+POSITION_GROUP_AUDIT_EVENTS_SQL = """
+CREATE TABLE IF NOT EXISTS position_group_audit_events (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    event_slug  TEXT NOT NULL,
+    audit_type  TEXT NOT NULL DEFAULT 'tick',
+    prev_state  TEXT,
+    new_state   TEXT,
+    reason      TEXT,
+    M_target    REAL,
+    D_target    REAL,
+    q_dir       REAL,
+    q_opp       REAL,
+    d           REAL,
+    m           REAL,
+    d_max       REAL,
+    merge_amount REAL,
+    merged_qty  REAL,
+    created_at  TEXT NOT NULL
+);
+"""
+
 # 校正戦略用の新カラム (既存 DB との後方互換性のため ALTER TABLE で追加)
 _CALIBRATION_COLUMNS = [
     ("market_type", "TEXT DEFAULT 'moneyline'"),
@@ -493,6 +514,34 @@ def _ensure_position_groups_table(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+def _ensure_position_group_audit_table(conn: sqlite3.Connection) -> None:
+    """Create position_group_audit_events table and ensure columns."""
+    conn.executescript(POSITION_GROUP_AUDIT_EVENTS_SQL)
+    existing = {
+        row[1] for row in conn.execute("PRAGMA table_info(position_group_audit_events)").fetchall()
+    }
+    columns = [
+        ("audit_type", "TEXT NOT NULL DEFAULT 'tick'"),
+        ("prev_state", "TEXT"),
+        ("new_state", "TEXT"),
+        ("reason", "TEXT"),
+        ("M_target", "REAL"),
+        ("D_target", "REAL"),
+        ("q_dir", "REAL"),
+        ("q_opp", "REAL"),
+        ("d", "REAL"),
+        ("m", "REAL"),
+        ("d_max", "REAL"),
+        ("merge_amount", "REAL"),
+        ("merged_qty", "REAL"),
+        ("created_at", "TEXT"),
+    ]
+    for col_name, col_def in columns:
+        if col_name not in existing:
+            conn.execute(f"ALTER TABLE position_group_audit_events ADD COLUMN {col_name} {col_def}")
+    conn.commit()
+
+
 RISK_TABLES_SQL = """
 CREATE TABLE IF NOT EXISTS circuit_breaker_events (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -539,6 +588,14 @@ def _ensure_indexes(conn: sqlite3.Connection) -> None:
         "CREATE INDEX IF NOT EXISTS idx_trade_jobs_game_date ON trade_jobs(game_date)",
         "CREATE INDEX IF NOT EXISTS idx_position_groups_state ON position_groups(state)",
         "CREATE INDEX IF NOT EXISTS idx_position_groups_event_slug ON position_groups(event_slug)",
+        (
+            "CREATE INDEX IF NOT EXISTS idx_position_group_audit_event_slug "
+            "ON position_group_audit_events(event_slug)"
+        ),
+        (
+            "CREATE INDEX IF NOT EXISTS idx_position_group_audit_created_at "
+            "ON position_group_audit_events(created_at)"
+        ),
     ]
     for sql in indexes:
         conn.execute(sql)
@@ -565,5 +622,6 @@ def _connect(db_path: Path | str = DEFAULT_DB_PATH) -> sqlite3.Connection:
     _ensure_risk_tables(conn)
     _ensure_llm_analyses_table(conn)
     _ensure_position_groups_table(conn)
+    _ensure_position_group_audit_table(conn)
     _ensure_indexes(conn)
     return conn
