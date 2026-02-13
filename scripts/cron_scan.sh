@@ -13,9 +13,11 @@ if ! mkdir "$LOCKDIR" 2>/dev/null; then
 fi
 trap 'rmdir "$LOCKDIR"' EXIT
 
-PROJECT_DIR="/Users/taro/dev/nbabot"
+PROJECT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 PYTHON="${PROJECT_DIR}/.venv/bin/python"
 LOG_DIR="${PROJECT_DIR}/data/logs"
+
+cd "$PROJECT_DIR"
 
 mkdir -p "$LOG_DIR"
 

@@ -7,13 +7,13 @@
     <string>com.nbabot.watchdog</string>
     <key>ProgramArguments</key>
     <array>
-        <string>/Users/taro/dev/nbabot/.venv/bin/python</string>
-        <string>/Users/taro/dev/nbabot/scripts/watchdog.py</string>
+        <string>/Users/ikuma/dev/nbabot/.venv/bin/python</string>
+        <string>/Users/ikuma/dev/nbabot/scripts/watchdog.py</string>
     </array>
     <key>StartInterval</key>
     <integer>600</integer>
     <key>WorkingDirectory</key>
-    <string>/Users/taro/dev/nbabot</string>
+    <string>/Users/ikuma/dev/nbabot</string>
     <key>StandardOutPath</key>
     <string>/dev/null</string>
     <key>StandardErrorPath</key>

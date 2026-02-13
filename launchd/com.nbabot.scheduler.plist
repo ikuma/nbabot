@@ -7,12 +7,12 @@
     <string>com.nbabot.scheduler</string>
     <key>ProgramArguments</key>
     <array>
-        <string>/Users/taro/dev/nbabot/scripts/cron_schedule.sh</string>
+        <string>/Users/ikuma/dev/nbabot/scripts/cron_schedule.sh</string>
     </array>
     <key>StartInterval</key>
     <integer>900</integer>
     <key>WorkingDirectory</key>
-    <string>/Users/taro/dev/nbabot</string>
+    <string>/Users/ikuma/dev/nbabot</string>
     <key>StandardOutPath</key>
     <string>/dev/null</string>
     <key>StandardErrorPath</key>

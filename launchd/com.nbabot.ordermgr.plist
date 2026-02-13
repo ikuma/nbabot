@@ -7,12 +7,12 @@
     <string>com.nbabot.ordermgr</string>
     <key>ProgramArguments</key>
     <array>
-        <string>/Users/taro/dev/nbabot/scripts/cron_ordermgr.sh</string>
+        <string>/Users/ikuma/dev/nbabot/scripts/cron_ordermgr.sh</string>
     </array>
     <key>StartInterval</key>
     <integer>120</integer>
     <key>WorkingDirectory</key>
-    <string>/Users/taro/dev/nbabot</string>
+    <string>/Users/ikuma/dev/nbabot</string>
     <key>StandardOutPath</key>
     <string>/dev/null</string>
     <key>StandardErrorPath</key>
