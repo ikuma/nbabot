@@ -10,7 +10,7 @@ from zoneinfo import ZoneInfo
 import httpx
 
 from src.config import settings
-from src.connectors.team_mapping import normalize_team_name
+from src.connectors.team_mapping import get_team_abbr, normalize_team_name
 
 logger = logging.getLogger(__name__)
 
@@ -32,6 +32,18 @@ class NBAGame:
     away_score: int = 0
     period: int = 0  # 1-4 = regulation, 5+ = OT
     game_status_text: str = ""  # "Final", "Final/OT", "Postponed" etc.
+
+
+def _compose_team_name(team: dict) -> str:
+    """Compose and normalize team full name from NBA API team object."""
+    city = team.get("teamCity") or ""
+    name = team.get("teamName") or ""
+    return normalize_team_name(f"{city} {name}".strip())
+
+
+def _is_supported_nba_team(full_name: str) -> bool:
+    """Return True if the team is in canonical 30-team mapping."""
+    return bool(get_team_abbr(full_name))
 
 
 def fetch_todays_games() -> list[NBAGame]:
@@ -60,13 +72,19 @@ def fetch_todays_games() -> list[NBAGame]:
     for g in raw_games:
         home = g.get("homeTeam", {})
         away = g.get("awayTeam", {})
-        home_name = f"{home.get('teamCity', '')} {home.get('teamName', '')}".strip()
-        away_name = f"{away.get('teamCity', '')} {away.get('teamName', '')}".strip()
-        home_name = normalize_team_name(home_name)
-        away_name = normalize_team_name(away_name)
+        home_name = _compose_team_name(home)
+        away_name = _compose_team_name(away)
 
         if not home_name or not away_name:
             logger.warning("Skipping game with missing team info: %s", g.get("gameId"))
+            continue
+        if not _is_supported_nba_team(home_name) or not _is_supported_nba_team(away_name):
+            logger.info(
+                "Skipping non-standard matchup: %s @ %s (gameId=%s)",
+                away_name,
+                home_name,
+                g.get("gameId"),
+            )
             continue
 
         games.append(
@@ -155,14 +173,20 @@ def fetch_games_for_date(date_str: str) -> list[NBAGame]:
     for g in target_games:
         home = g.get("homeTeam", {})
         away = g.get("awayTeam", {})
-        home_name = f"{home.get('teamCity', '')} {home.get('teamName', '')}".strip()
-        away_name = f"{away.get('teamCity', '')} {away.get('teamName', '')}".strip()
-        home_name = normalize_team_name(home_name)
-        away_name = normalize_team_name(away_name)
+        home_name = _compose_team_name(home)
+        away_name = _compose_team_name(away)
 
         if not home_name or not away_name:
             logger.warning(
                 "Skipping game with missing team info: %s", g.get("gameId"),
+            )
+            continue
+        if not _is_supported_nba_team(home_name) or not _is_supported_nba_team(away_name):
+            logger.info(
+                "Skipping non-standard matchup: %s @ %s (gameId=%s)",
+                away_name,
+                home_name,
+                g.get("gameId"),
             )
             continue
 

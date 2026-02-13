@@ -5,9 +5,8 @@ from __future__ import annotations
 from unittest.mock import patch
 
 import httpx
-import pytest
 
-from src.connectors.nba_schedule import NBAGame, fetch_todays_games
+from src.connectors.nba_schedule import NBAGame, fetch_games_for_date, fetch_todays_games
 
 _DUMMY_REQUEST = httpx.Request("GET", "https://cdn.nba.com/static/json/liveData/scoreboard/todaysScoreboard_00.json")
 
@@ -101,6 +100,66 @@ class TestFetchTodaysGames:
                         "gameStatus": 1,
                         "homeTeam": {"teamCity": "", "teamName": ""},
                         "awayTeam": {"teamCity": "New York", "teamName": "Knicks"},
+                    },
+                    {
+                        "gameId": "002",
+                        "gameTimeUTC": "2026-02-08T20:00:00Z",
+                        "gameStatus": 1,
+                        "homeTeam": {"teamCity": "Boston", "teamName": "Celtics"},
+                        "awayTeam": {"teamCity": "New York", "teamName": "Knicks"},
+                    },
+                ]
+            }
+        }
+        mock_resp = httpx.Response(200, request=_DUMMY_REQUEST, json=data)
+        mock_get.return_value = mock_resp
+
+        games = fetch_todays_games()
+        assert len(games) == 1
+        assert games[0].game_id == "002"
+
+    @patch("src.connectors.nba_schedule.httpx.get")
+    def test_skips_none_team_fields(self, mock_get):
+        """None in teamCity/teamName should be treated as missing and skipped."""
+        data = {
+            "scoreboard": {
+                "games": [
+                    {
+                        "gameId": "001",
+                        "gameTimeUTC": "2026-02-08T17:30:00Z",
+                        "gameStatus": 1,
+                        "homeTeam": {"teamCity": None, "teamName": None},
+                        "awayTeam": {"teamCity": "New York", "teamName": "Knicks"},
+                    },
+                    {
+                        "gameId": "002",
+                        "gameTimeUTC": "2026-02-08T20:00:00Z",
+                        "gameStatus": 1,
+                        "homeTeam": {"teamCity": "Boston", "teamName": "Celtics"},
+                        "awayTeam": {"teamCity": "Miami", "teamName": "Heat"},
+                    },
+                ]
+            }
+        }
+        mock_resp = httpx.Response(200, request=_DUMMY_REQUEST, json=data)
+        mock_get.return_value = mock_resp
+
+        games = fetch_todays_games()
+        assert len(games) == 1
+        assert games[0].game_id == "002"
+
+    @patch("src.connectors.nba_schedule.httpx.get")
+    def test_skips_non_standard_matchups(self, mock_get):
+        """Non-30-team special matchups should be filtered out."""
+        data = {
+            "scoreboard": {
+                "games": [
+                    {
+                        "gameId": "allstar-1",
+                        "gameTimeUTC": "2026-02-08T17:30:00Z",
+                        "gameStatus": 1,
+                        "homeTeam": {"teamCity": "Team", "teamName": "Melo"},
+                        "awayTeam": {"teamCity": "Team", "teamName": "Austin"},
                     },
                     {
                         "gameId": "002",
@@ -229,3 +288,33 @@ class TestNBAGame:
         )
         assert game.game_id == "001"
         assert game.home_team == "Boston Celtics"
+
+
+class TestFetchGamesForDate:
+    @patch("src.connectors.nba_schedule._fetch_season_schedule")
+    def test_filters_non_standard_matchups(self, mock_fetch):
+        mock_fetch.return_value = [
+            {
+                "gameDate": "02/13/2026 00:00:00",
+                "games": [
+                    {
+                        "gameId": "allstar-2",
+                        "gameDateTimeUTC": "2026-02-13T23:00:00Z",
+                        "gameStatus": 1,
+                        "homeTeam": {"teamCity": "Team", "teamName": "T-Mac"},
+                        "awayTeam": {"teamCity": "Team", "teamName": "Vince"},
+                    },
+                    {
+                        "gameId": "std-1",
+                        "gameDateTimeUTC": "2026-02-13T23:30:00Z",
+                        "gameStatus": 1,
+                        "homeTeam": {"teamCity": "Boston", "teamName": "Celtics"},
+                        "awayTeam": {"teamCity": "New York", "teamName": "Knicks"},
+                    },
+                ],
+            },
+        ]
+
+        games = fetch_games_for_date("2026-02-13")
+        assert len(games) == 1
+        assert games[0].game_id == "std-1"
