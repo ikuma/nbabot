@@ -24,6 +24,7 @@
 - 自動決済 dry-run: `python scripts/settle.py --auto --dry-run`
 - 未決済一覧: `python scripts/settle.py --list`
 - 接続確認: `python scripts/check_balance.py`
+- 実運用前ゲート(疎通+shadow+paper+最小回帰): `python scripts/pre_practice_gate.py`
 
 ## launchd
 
