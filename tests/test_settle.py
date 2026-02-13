@@ -160,6 +160,25 @@ class TestAutoSettle:
 
     @patch("src.connectors.nba_schedule.fetch_todays_games")
     @patch("src.store.db.get_unsettled")
+    @patch("src.store.db.log_result")
+    def test_skips_unfilled_order_status(self, mock_log_result, mock_unsettled, mock_games):
+        """Signals with non-settleable order_status should be skipped."""
+        signal = _make_signal(
+            team="Celtics",
+            event_slug="nba-nyk-bos-2026-02-09",
+            order_status="failed",
+        )
+        mock_unsettled.return_value = [signal]
+        mock_games.return_value = [_make_game(home_score=112, away_score=105)]
+
+        summary = auto_settle(today="2026-02-09")
+
+        assert len(summary.settled) == 0
+        assert summary.skipped == 1
+        mock_log_result.assert_not_called()
+
+    @patch("src.connectors.nba_schedule.fetch_todays_games")
+    @patch("src.store.db.get_unsettled")
     def test_skips_non_final_games(self, mock_unsettled, mock_games):
         """In-progress games should be skipped."""
         signal = _make_signal(event_slug="nba-nyk-bos-2026-02-09")

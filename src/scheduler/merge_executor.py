@@ -203,6 +203,18 @@ def process_merge_eligible(
                 logger.warning("MERGE skip %s: missing signals", bs_gid[:8])
                 continue
 
+            # live 実運用では約定済み在庫のみを MERGE 対象にする
+            if execution_mode == "live":
+                non_filled = [s for s in all_signals if s.order_status != "filled"]
+                if non_filled:
+                    logger.info(
+                        "MERGE skip %s: waiting fills (%d/%d not filled)",
+                        bs_gid[:8],
+                        len(non_filled),
+                        len(all_signals),
+                    )
+                    continue
+
             # condition_id チェック (旧シグナルは condition_id なし)
             condition_id = dir_signals[0].condition_id
             if not condition_id:

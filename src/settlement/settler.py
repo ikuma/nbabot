@@ -25,6 +25,8 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 
+SETTLEABLE_ORDER_STATUSES = {"paper", "filled"}
+
 
 def _parse_slug(slug: str) -> tuple[str, str, str] | None:
     """Parse event_slug 'nba-{away}-{home}-YYYY-MM-DD' -> (away_abbr, home_abbr, date)."""
@@ -144,6 +146,14 @@ def settle_signal(signal_id: int, winner: str, db_path: Path | str | None = None
     signal = next((s for s in unsettled if s.id == signal_id), None)
     if signal is None:
         log.error("Signal #%d not found or already settled", signal_id)
+        return
+
+    if signal.order_status not in SETTLEABLE_ORDER_STATUSES:
+        log.info(
+            "Skipping settle for signal #%d: order_status=%s is not settleable",
+            signal.id,
+            signal.order_status,
+        )
         return
 
     won = signal.team == winner
@@ -451,6 +461,15 @@ def auto_settle(
     settled_signals: list[tuple[SignalRecord, float, bool, str]] = []
 
     for signal in unsettled:
+        if signal.order_status not in SETTLEABLE_ORDER_STATUSES:
+            summary.skipped += 1
+            log.info(
+                "Skipping signal #%d from settle: order_status=%s",
+                signal.id,
+                signal.order_status,
+            )
+            continue
+
         result = _resolve_winner(signal, winner_cache, game_index, today_str)
         if result is None:
             summary.skipped += 1

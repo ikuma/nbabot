@@ -148,6 +148,17 @@ def _compute_hedge_order_price(
     return best_ask, order_price
 
 
+def _defer_or_skip_hedge_job(
+    job_id: int,
+    execution_mode: str,
+    reason: str,
+    db_path: str,
+) -> None:
+    """Keep hedge job retryable in live mode; skip in non-live modes."""
+    status = "pending" if execution_mode == "live" else "skipped"
+    update_job_status(job_id, status, error_message=reason, db_path=db_path)
+
+
 def process_hedge_job(
     job: TradeJob,
     execution_mode: str,
@@ -181,8 +192,11 @@ def process_hedge_job(
         # 最新価格を取得
         ml = fetch_moneyline_for_game(job.away_team, job.home_team, job.game_date)
         if not ml:
-            update_job_status(
-                job.id, "skipped", error_message="No moneyline market", db_path=db_path
+            _defer_or_skip_hedge_job(
+                job_id=job.id,
+                execution_mode=execution_mode,
+                reason="No moneyline market",
+                db_path=db_path,
             )
             return JobResult(job.id, job.event_slug, "skipped")
 
@@ -193,8 +207,11 @@ def process_hedge_job(
         )
 
         if hedge_price is None or hedge_outcome is None or hedge_token_id is None:
-            update_job_status(
-                job.id, "skipped", error_message="Cannot find hedge outcome", db_path=db_path
+            _defer_or_skip_hedge_job(
+                job_id=job.id,
+                execution_mode=execution_mode,
+                reason="Cannot find hedge outcome",
+                db_path=db_path,
             )
             return JobResult(job.id, job.event_slug, "skipped")
 
@@ -227,10 +244,14 @@ def process_hedge_job(
         max_hedge_price = min(max_hedge_price, settings.bothside_max_combined_vwap - dir_vwap)
 
         if max_hedge_price < 0.01:
-            update_job_status(
-                job.id,
-                "skipped",
-                error_message=f"max_hedge {max_hedge_price:.3f} < 0.01 (dir_vwap={dir_vwap:.3f})",
+            reason = (
+                f"max_hedge {max_hedge_price:.3f} < 0.01 "
+                f"(dir_vwap={dir_vwap:.3f})"
+            )
+            _defer_or_skip_hedge_job(
+                job_id=job.id,
+                execution_mode=execution_mode,
+                reason=reason,
                 db_path=db_path,
             )
             logger.info(
@@ -252,11 +273,14 @@ def process_hedge_job(
         # Combined VWAP 最終チェック (MERGE 上限)
         combined = dir_vwap + order_price
         if combined >= settings.bothside_max_combined_vwap:
-            update_job_status(
-                job.id,
-                "skipped",
-                error_message=f"Combined VWAP {combined:.4f} >= "
-                f"{settings.bothside_max_combined_vwap}",
+            reason = (
+                f"Combined VWAP {combined:.4f} >= "
+                f"{settings.bothside_max_combined_vwap}"
+            )
+            _defer_or_skip_hedge_job(
+                job_id=job.id,
+                execution_mode=execution_mode,
+                reason=reason,
                 db_path=db_path,
             )
             logger.info(
@@ -276,8 +300,11 @@ def process_hedge_job(
         _curve = get_default_curve()
         est = _curve.estimate(order_price)
         if est is None:
-            update_job_status(
-                job.id, "skipped", error_message="No calibration band for hedge", db_path=db_path
+            _defer_or_skip_hedge_job(
+                job_id=job.id,
+                execution_mode=execution_mode,
+                reason="No calibration band for hedge",
+                db_path=db_path,
             )
             return JobResult(job.id, job.event_slug, "skipped")
 
@@ -329,8 +356,11 @@ def process_hedge_job(
         )
 
         if budget.slice_size_usd <= 0:
-            update_job_status(
-                job.id, "skipped", error_message="Hedge DCA budget is zero", db_path=db_path
+            _defer_or_skip_hedge_job(
+                job_id=job.id,
+                execution_mode=execution_mode,
+                reason="Hedge DCA budget is zero",
+                db_path=db_path,
             )
             return JobResult(job.id, job.event_slug, "skipped")
 
